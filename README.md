@@ -6,6 +6,9 @@
 - 视频教程：https://www.youtube.com/watch?v=MU_ySjg98F8
 - telegram交流反馈群组：https://t.me/eooceu
 
+### 相关文档
+- **[Sin-Box 部署指南](./docs/sin-box-guide.md)** - 详细的中文安装和配置指南，包含环境变量设置、故障排除和最佳实践
+
 ### 前置要求
 * GitHub 账户：需要有一个 GitHub 账户来创建仓库和设置工作流
 * SAP Cloud 账户：需要有 SAP Cloud 有效账户,点此注册：https://www.sap.com
