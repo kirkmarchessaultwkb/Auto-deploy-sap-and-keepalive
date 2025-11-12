@@ -29,9 +29,11 @@
      - SUB_PATH(订阅token,未设置默认是sub)
    - 可选环境变量
      - ARGO_PORT(自定义argo隧道端口,不设置默认为8001)
-     - NEZHA_SERVER(v1形式: nezha.xxx.com:8008  v0形式：nezha.xxx.com)
-     - NEZHA_PORT(V1哪吒没有这个)
-     - NEZHA_KEY(v1的NZ_CLIENT_SECRET或v0的agent密钥)
+     - NEZHA_SERVER(哪吒监控服务器地址，支持v0和v1协议自动检测)
+          - v0格式: nezha.xxx.com (服务器地址，不含端口)
+          - v1格式: nezha.xxx.com:8008 (服务器地址含端口)
+     - NEZHA_PORT(可选，仅v0协议使用，指定哪吒服务器端口)
+     - NEZHA_KEY(哪吒客户端密钥，v1使用NZ_CLIENT_SECRET，v0使用agent密钥)
      - CFIP(优选域名或优选ip),使用直连镜像时没有此变量
      - CFPORT(优选域名或优选ip对应端口),使用直连镜像时没有此变量
      - DOCKER_IMAGE(使用的docker镜像),默认使用argo隧道CDN
@@ -49,6 +51,45 @@
 6. **获取节点信息**
 * 点开运行的actions，点击`详细部署信息` 查看服务链接，访问域名显示Hello world说明正常
 * 订阅： 域名/$SUB_PATH    SUB_PATH变量没设置默认是sub  即订阅为：域名/sub
+
+## 哪吒监控集成
+
+本系统支持自动集成哪吒监控代理，提供以下功能：
+
+### 功能特性
+- **架构自动检测**: 支持AMD64和ARM架构，自动下载对应的二进制文件
+- **协议版本自动检测**: 自动识别v0和v1协议，无需手动配置
+- **智能缓存**: 重复使用已下载的代理文件，节省带宽和磁盘空间
+- **自动保活**: 集成30秒看门狗机制，崩溃时自动重启
+- **资源管理**: 使用nice/ionice策略，最小化资源占用
+- **详细日志**: 所有操作记录到`logs/nezha.log`
+
+### 配置说明
+
+#### v0协议配置
+```
+NEZHA_SERVER=nezha.example.com
+NEZHA_PORT=5555
+NEZHA_KEY=your_v0_agent_key
+```
+
+#### v1协议配置
+```
+NEZHA_SERVER=nezha.example.com:8008
+NEZHA_KEY=your_nz_client_secret
+# NEZHA_PORT 不需要设置
+```
+
+### 协议检测逻辑
+- 如果设置了`NEZHA_PORT`，使用v0协议
+- 如果`NEZHA_SERVER`包含端口，使用v1协议
+- 如果`NEZHA_SERVER`不含端口且未设置`NEZHA_PORT`，使用v0协议（默认端口5555）
+
+### 验证部署
+部署完成后，可以通过以下方式验证哪吒代理是否正常运行：
+1. 查看哪吒管理面板，确认节点已上线
+2. 检查应用日志中的哪吒相关信息
+3. 在哪吒面板中查看CPU、内存、网络等监控数据
 
 
 ## 保活(选择其中一种即可)

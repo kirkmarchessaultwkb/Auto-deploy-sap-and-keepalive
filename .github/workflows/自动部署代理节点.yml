@@ -303,6 +303,59 @@ jobs:
     - name: Restage application
       run: |
         cf restage ${{ env.APP_NAME }}
+        
+    - name: Setup Nezha agent (if configured)
+      run: |
+        # Wait for application to start
+        echo "Waiting for application to start..."
+        sleep 30
+        
+        # Check if Nezha configuration exists
+        if [[ -n "${{ secrets.NEZHA_SERVER }}" && -n "${{ secrets.NEZHA_KEY }}" ]]; then
+          echo "Nezha configuration detected, setting up agent..."
+          
+          # Execute Nezha setup commands inside the running container
+          if cf ssh ${{ env.APP_NAME }} -c "
+            if [[ -n '${{ secrets.NEZHA_SERVER }}' && -n '${{ secrets.NEZHA_KEY }}' ]]; then
+              echo 'Setting up Nezha agent inside container...'
+              mkdir -p /app/bin /app/logs
+              
+              # Download the Nezha agent script
+              if command -v wget >/dev/null 2>&1; then
+                wget -O /app/nezha-agent.sh https://raw.githubusercontent.com/eooce/Auto-deploy-sap-and-keepalive/refs/heads/main/nezha-agent.sh
+              elif command -v curl >/dev/null 2>&1; then
+                curl -o /app/nezha-agent.sh https://raw.githubusercontent.com/eooce/Auto-deploy-sap-and-keepalive/refs/heads/main/nezha-agent.sh
+              else
+                echo 'Neither wget nor curl available, skipping Nezha setup'
+                exit 0
+              fi
+              
+              # Make script executable and run it
+              chmod +x /app/nezha-agent.sh
+              NEZHA_SERVER='${{ secrets.NEZHA_SERVER }}' NEZHA_PORT='${{ secrets.NEZHA_PORT }}' NEZHA_KEY='${{ secrets.NEZHA_KEY }}' /app/nezha-agent.sh &
+              
+              # Wait a moment and check if the agent started
+              sleep 10
+              if [[ -f /app/logs/nezha.log ]]; then
+                echo 'Nezha agent log file created successfully'
+                tail -5 /app/logs/nezha.log
+              fi
+              
+              if [[ -f /app/logs/nezha_status.json ]]; then
+                echo 'Nezha agent status:'
+                cat /app/logs/nezha_status.json
+              fi
+              
+              echo 'Nezha agent setup completed'
+            fi
+          "; then
+            echo "✅ Nezha agent setup completed successfully"
+          else
+            echo "⚠️ Nezha agent setup failed, but deployment continues"
+          fi
+        else
+          echo "Nezha configuration not found, skipping Nezha agent setup"
+        fi
 
     - name: Verify deployment
       run: |
