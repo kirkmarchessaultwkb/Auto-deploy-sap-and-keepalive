@@ -73,6 +73,70 @@ wget https://raw.githubusercontent.com/eooce/Auto-deploy-sap-and-keepalive/refs/
 4. 部署成功后返回到该worker设置中选择添加触发事件，添加cron触发器--cron表达式，设置为：`*/2 0 * * *` 保存，意思是北京时间早上8-9点每2分钟检查一次
 
 
+## sin-box框架集成 (新增)
+
+### 概述
+本项目现已支持sin-box框架部署，适用于zampto服务器（Node.js环境，2GB RAM，8GB磁盘）。该集成包含：
+- ✅ Vmess-Argo代理自动部署
+- ✅ 哪吒监控（支持v0和v1版本）
+- ✅ Telegram通知（启动、崩溃、恢复）
+- ✅ 进程自动修复（每30秒检查）
+- ✅ 资源优化（nice/ionice）
+
+### 快速开始
+详细文档请查看：[README-SINBOX.md](README-SINBOX.md)
+
+### 新增文件
+- **start.sh**: 主部署脚本（Vmess + Argo + 哪吒 + 监控）
+- **index.js**: Node.js HTTP服务器（订阅端点）
+- **package.json**: Node.js项目配置
+- **.env.example**: 环境变量示例
+
+### 新增环境变量
+除了原有的环境变量外，新增支持：
+- **CHAT_ID**: Telegram聊天ID（用于通知）
+- **BOT_TOKEN**: Telegram机器人令牌（可选，不设置则使用公共机器人）
+- **UPLOAD_URL**: 订阅上传地址（可选）
+- **DISABLE_ARGO**: 禁用Argo隧道（可选）
+
+### 订阅端点
+部署成功后，可通过以下端点访问：
+- **订阅**: `https://your-app-domain/sub`
+- **状态**: `https://your-app-domain/status`
+- **日志**: `https://your-app-domain/logs`
+- **健康检查**: `https://your-app-domain/`
+
+### Telegram通知示例
+脚本会自动发送以下通知：
+1. **启动成功**: 包含订阅链接和配置信息
+2. **服务崩溃**: 检测到服务停止时
+3. **自动恢复**: 服务重启成功后
+
+### 本地测试
+```bash
+# 克隆仓库
+git clone <repo-url>
+cd <repo-name>
+
+# 设置环境变量（参考.env.example）
+export UUID="your-uuid"
+export ARGO_DOMAIN="your-domain"
+# ... 其他环境变量
+
+# 启动服务
+npm start
+```
+
+### Docker部署
+```bash
+docker build -t vmess-argo-sinbox .
+docker run -d -p 8080:8080 \
+  -e UUID="your-uuid" \
+  -e ARGO_DOMAIN="your-domain" \
+  -e NEZHA_SERVER="nezha.example.com:8008" \
+  vmess-argo-sinbox
+```
+
 ## 注意事项
 
 1. 确保所有必需的GitHub Secrets已正确配置
@@ -80,3 +144,4 @@ wget https://raw.githubusercontent.com/eooce/Auto-deploy-sap-and-keepalive/refs/
 3. 试用版第二区域和企业版创建区域后,请一定要创建一个空间,名称随意,否则无法运行
 4. 部署区域（SG(free)和US(free)为试用版,其他为企业版，请选择和开设的平台对应,aws,gcp,azure
 5. 建议设置SUB_PATH订阅token,防止节点泄露
+6. **sin-box部署**: 使用ghcr.io/eooce/nodejs:main镜像，确保start.sh和index.js在根目录

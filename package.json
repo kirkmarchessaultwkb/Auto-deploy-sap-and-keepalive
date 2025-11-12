@@ -1,0 +1,26 @@
+{
+  "name": "vmess-argo-sinbox",
+  "version": "1.0.0",
+  "description": "Vmess-Argo deployment with Nezha monitoring and Telegram notifications for sin-box framework",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js"
+  },
+  "keywords": [
+    "vmess",
+    "argo",
+    "cloudflare",
+    "nezha",
+    "telegram",
+    "proxy",
+    "sin-box",
+    "zampto"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "dependencies": {}
+}
