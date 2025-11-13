@@ -1,0 +1,11 @@
+node_modules/
+.npm/
+logs/
+bin/
+etc/
+*.log
+.DS_Store
+.env
+.env.local
+*.pid
+*.sock
