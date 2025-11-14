@@ -1,0 +1,852 @@
+#!/bin/bash
+# DEBUG VERSION with detailed step-by-step logging
+set -euo pipefail
+
+# Enable job control
+set +m
+
+# ============================================================================
+# Configuration and Global Variables
+# ============================================================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BIN_DIR="${SCRIPT_DIR}/bin"
+LOG_DIR="${SCRIPT_DIR}/logs"
+NPM_DIR="${SCRIPT_DIR}/.npm"
+ETC_DIR="${SCRIPT_DIR}/etc"
+XRAY_BIN="${BIN_DIR}/xray"
+XRAY_CONFIG="${ETC_DIR}/xray-config.json"
+CLOUDFLARED_BIN="${BIN_DIR}/cloudflared"
+PID_XRAY=""
+PID_CLOUDFLARED=""
+PID_NODE=""
+CLOUDFLARE_URL=""
+WATCHDOG_INTERVAL=30
+
+# Environment variables with defaults
+UUID="${UUID:-}"
+CFIP="${CFIP:-}"
+CFPORT="${CFPORT:-443}"
+DISABLE_ARGO="${DISABLE_ARGO:-0}"
+ARGO_DOMAIN="${ARGO_DOMAIN:-}"
+ARGO_AUTH="${ARGO_AUTH:-}"
+SERVER_PORT="${SERVER_PORT:-3000}"
+
+# ============================================================================
+# Utility Functions
+# ============================================================================
+
+log() {
+  echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*"
+}
+
+log_error() {
+  echo "[$(date +'%Y-%m-%d %H:%M:%S')] [ERROR] $*" >&2
+}
+
+log_step() {
+  echo ""
+  echo "=================================================="
+  echo "[STEP $1] $2"
+  echo "=================================================="
+}
+
+log_success() {
+  echo "✓ $*"
+}
+
+log_fail() {
+  echo "✗ $*"
+}
+
+generate_uuid() {
+  if command -v uuidgen >/dev/null 2>&1; then
+    uuidgen | tr '[:upper:]' '[:lower:]'
+  else
+    cat /proc/sys/kernel/random/uuid 2>/dev/null || \
+    od -An -tx1 -N16 /dev/urandom | tr ' ' '-' | sed 's/^-//' | tr '[:upper:]' '[:lower:]'
+  fi
+}
+
+detect_arch() {
+  local arch=$(uname -m)
+  case "$arch" in
+    x86_64|amd64)
+      echo "amd64"
+      ;;
+    aarch64|arm64)
+      echo "arm64"
+      ;;
+    armv7|armhf)
+      echo "armv7"
+      ;;
+    *)
+      log_error "Unsupported architecture: $arch"
+      return 1
+      ;;
+  esac
+}
+
+# ============================================================================
+# Setup: Create directories and validate environment
+# ============================================================================
+
+setup_directories() {
+  log_step 1 "Setting up directories..."
+  
+  log "Creating directories:"
+  log "  - BIN_DIR: $BIN_DIR"
+  log "  - LOG_DIR: $LOG_DIR"
+  log "  - NPM_DIR: $NPM_DIR"
+  log "  - ETC_DIR: $ETC_DIR"
+  
+  if mkdir -p "$BIN_DIR" "$LOG_DIR" "$NPM_DIR" "$ETC_DIR"; then
+    log_success "Directories created successfully"
+    
+    # Verify directories exist
+    for dir in "$BIN_DIR" "$LOG_DIR" "$NPM_DIR" "$ETC_DIR"; do
+      if [ -d "$dir" ]; then
+        log "  ✓ $dir"
+      else
+        log_fail "Failed to create $dir"
+        exit 1
+      fi
+    done
+  else
+    log_fail "Failed to create directories"
+    exit 1
+  fi
+}
+
+validate_environment() {
+  log_step 2 "Validating environment..."
+  
+  # Detect architecture
+  local arch=$(detect_arch)
+  if [ $? -eq 0 ]; then
+    log_success "Architecture detected: $arch"
+  else
+    log_fail "Failed to detect architecture"
+    exit 1
+  fi
+  
+  # Generate UUID if not provided
+  if [ -z "$UUID" ]; then
+    log "UUID not provided, generating new one..."
+    UUID=$(generate_uuid)
+    if [ -n "$UUID" ]; then
+      export UUID
+      log_success "UUID generated: $UUID"
+    else
+      log_fail "Failed to generate UUID"
+      exit 1
+    fi
+  else
+    log_success "UUID provided: $UUID"
+  fi
+  
+  echo ""
+  log "Environment configuration:"
+  log "  UUID:         $UUID"
+  log "  CFIP:         ${CFIP:-not set}"
+  log "  CFPORT:       $CFPORT"
+  log "  DISABLE_ARGO: $DISABLE_ARGO"
+  log "  ARGO_DOMAIN:  ${ARGO_DOMAIN:-not set}"
+  log "  ARGO_AUTH:    ${ARGO_AUTH:+***configured***}"
+  log "  SERVER_PORT:  $SERVER_PORT"
+  
+  log_success "Environment validated"
+}
+
+# ============================================================================
+# Xray Setup and Management
+# ============================================================================
+
+download_xray() {
+  log_step 3 "Downloading Xray binary..."
+  
+  if [ -f "$XRAY_BIN" ]; then
+    log "Xray binary already exists at: $XRAY_BIN"
+    # Get version if possible
+    if [ -x "$XRAY_BIN" ]; then
+      local version=$("$XRAY_BIN" version 2>/dev/null | head -1 || echo "unknown")
+      log_success "Using existing Xray: $version"
+    else
+      log_success "Using existing Xray binary"
+    fi
+    return 0
+  fi
+  
+  local arch=$(detect_arch)
+  log "Detected architecture: $arch"
+  
+  # Try to get latest release info with retries
+  log "Fetching Xray release information from GitHub..."
+  local release_data=""
+  local retry_count=0
+  while [ -z "$release_data" ] && [ $retry_count -lt 3 ]; do
+    log "  Attempt $((retry_count + 1))/3..."
+    release_data=$(curl -s "https://api.github.com/repos/XTLS/Xray-core/releases/latest")
+    if [ -z "$release_data" ] || echo "$release_data" | grep -q "404"; then
+      retry_count=$((retry_count + 1))
+      if [ $retry_count -lt 3 ]; then
+        log "  Failed, retrying in 2 seconds..."
+        sleep 2
+      fi
+    else
+      break
+    fi
+  done
+  
+  if [ -z "$release_data" ]; then
+    log_fail "Failed to fetch Xray release information after 3 attempts"
+    log "Network error or GitHub API unavailable"
+    exit 1
+  fi
+  
+  log_success "Release information fetched"
+  
+  # Extract version
+  local version=$(echo "$release_data" | grep -oP '"tag_name":"[^"]*"' | head -1 | cut -d'"' -f4)
+  log "Latest Xray version: $version"
+  
+  # Determine the correct release file for the architecture
+  local download_url=""
+  case "$arch" in
+    amd64)
+      download_url=$(echo "$release_data" | grep -oP '"browser_download_url":"[^"]*linux-64\.zip"' | head -1 | cut -d'"' -f4)
+      ;;
+    arm64)
+      download_url=$(echo "$release_data" | grep -oP '"browser_download_url":"[^"]*linux-arm64-v8\.zip"' | head -1 | cut -d'"' -f4)
+      ;;
+    armv7)
+      download_url=$(echo "$release_data" | grep -oP '"browser_download_url":"[^"]*linux-arm32-v7\.zip"' | head -1 | cut -d'"' -f4)
+      ;;
+  esac
+  
+  if [ -z "$download_url" ]; then
+    log_fail "Could not find Xray download URL for architecture: $arch"
+    exit 1
+  fi
+  
+  log "Download URL: $download_url"
+  
+  local temp_dir=$(mktemp -d)
+  trap "rm -rf $temp_dir" RETURN
+  log "Using temporary directory: $temp_dir"
+  
+  log "Downloading Xray..."
+  if ! curl -L -o "${temp_dir}/xray.zip" "$download_url"; then
+    log_fail "Failed to download Xray from $download_url"
+    exit 1
+  fi
+  log_success "Download complete"
+  
+  # Check if unzip is available
+  if ! command -v unzip >/dev/null 2>&1; then
+    log_fail "unzip command not found - required to extract Xray"
+    exit 1
+  fi
+  
+  log "Extracting Xray..."
+  if ! unzip -q -o "${temp_dir}/xray.zip" -d "$temp_dir"; then
+    log_fail "Failed to extract Xray archive"
+    exit 1
+  fi
+  log_success "Extraction complete"
+  
+  log "Installing Xray binary to $XRAY_BIN..."
+  if ! cp "${temp_dir}/xray" "$XRAY_BIN"; then
+    log_fail "Failed to copy Xray binary to $XRAY_BIN"
+    exit 1
+  fi
+  
+  chmod +x "$XRAY_BIN"
+  
+  # Strip the binary to reduce size
+  if command -v strip >/dev/null 2>&1; then
+    log "Stripping binary to reduce size..."
+    strip "$XRAY_BIN" || true
+  fi
+  
+  log_success "Xray installed successfully at: $XRAY_BIN"
+  
+  # Verify installation
+  if [ -x "$XRAY_BIN" ]; then
+    local installed_version=$("$XRAY_BIN" version 2>/dev/null | head -1 || echo "unknown")
+    log "Installed version: $installed_version"
+  fi
+}
+
+generate_xray_config() {
+  log_step 4 "Generating Xray configuration..."
+  
+  log "Creating config file at: $XRAY_CONFIG"
+  log "UUID: $UUID"
+  log "Port: 10000"
+  log "Protocol: vmess"
+  log "Network: ws"
+  log "Path: /ws"
+  
+  cat > "$XRAY_CONFIG" <<'EOF'
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "port": 10000,
+      "protocol": "vmess",
+      "settings": {
+        "clients": [
+          {
+            "id": "PLACEHOLDER_UUID",
+            "level": 1,
+            "alterId": 0
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "wsSettings": {
+          "path": "/ws"
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "tag": "direct"
+    },
+    {
+      "protocol": "blackhole",
+      "tag": "blocked"
+    }
+  ],
+  "routing": {
+    "rules": [
+      {
+        "outboundTag": "blocked",
+        "domain": ["geosite:category-ads"]
+      }
+    ]
+  }
+}
+EOF
+  
+  if [ ! -f "$XRAY_CONFIG" ]; then
+    log_fail "Failed to create configuration file"
+    exit 1
+  fi
+  
+  # Replace UUID placeholder
+  log "Injecting UUID into configuration..."
+  sed -i "s/PLACEHOLDER_UUID/${UUID}/g" "$XRAY_CONFIG"
+  
+  # Verify UUID was replaced
+  if grep -q "$UUID" "$XRAY_CONFIG"; then
+    log_success "Configuration generated and UUID injected successfully"
+  else
+    log_fail "Failed to inject UUID into configuration"
+    exit 1
+  fi
+}
+
+# ============================================================================
+# Xray Startup
+# ============================================================================
+
+start_xray() {
+  log_step 5 "Starting Xray..."
+  
+  if [ ! -f "$XRAY_BIN" ]; then
+    log_fail "Xray binary not found at $XRAY_BIN"
+    exit 1
+  fi
+  
+  if [ ! -f "$XRAY_CONFIG" ]; then
+    log_fail "Xray config not found at $XRAY_CONFIG"
+    exit 1
+  fi
+  
+  local xray_log="${LOG_DIR}/xray.log"
+  log "Log file: $xray_log"
+  
+  # Use ionice and nice for resource optimization
+  log "Starting Xray process..."
+  if command -v ionice >/dev/null 2>&1; then
+    log "Using ionice and nice for process priority optimization"
+    ionice -c 3 nice -n 15 "$XRAY_BIN" run -c "$XRAY_CONFIG" >"$xray_log" 2>&1 &
+  else
+    log "Using nice for process priority optimization"
+    nice -n 15 "$XRAY_BIN" run -c "$XRAY_CONFIG" >"$xray_log" 2>&1 &
+  fi
+  
+  PID_XRAY=$!
+  log "Xray started with PID: $PID_XRAY"
+  
+  # Wait a moment for Xray to initialize
+  log "Waiting 2 seconds for Xray to initialize..."
+  sleep 2
+  
+  # Verify the process is still running
+  if kill -0 "$PID_XRAY" 2>/dev/null; then
+    log_success "Xray is running (PID: $PID_XRAY)"
+  else
+    log_fail "Xray failed to start"
+    echo ""
+    log "Xray log contents:"
+    echo "----------------------------------------"
+    cat "$xray_log"
+    echo "----------------------------------------"
+    exit 1
+  fi
+  
+  # Show first few lines of log
+  if [ -s "$xray_log" ]; then
+    log "Initial log output:"
+    head -10 "$xray_log" | while read line; do
+      log "  $line"
+    done
+  fi
+}
+
+# ============================================================================
+# Cloudflared Setup and Management
+# ============================================================================
+
+download_cloudflared() {
+  log_step 6 "Setting up Cloudflared..."
+  
+  if [ "$DISABLE_ARGO" = "1" ]; then
+    log "Argo tunneling disabled (DISABLE_ARGO=1)"
+    log_success "Skipping Cloudflared setup"
+    return 0
+  fi
+  
+  # If using fixed tunnel, we might not need to download cloudflared
+  if [ -n "$ARGO_DOMAIN" ] && [ -n "$ARGO_AUTH" ]; then
+    log "Using fixed Argo tunnel configuration"
+    log "  Domain: $ARGO_DOMAIN"
+    log "  Auth: ***configured***"
+    log_success "Skipping Cloudflared binary download (using fixed tunnel)"
+    return 0
+  fi
+  
+  # Check if already downloaded
+  if [ -f "$CLOUDFLARED_BIN" ]; then
+    log "Cloudflared binary already exists at: $CLOUDFLARED_BIN"
+    if [ -x "$CLOUDFLARED_BIN" ]; then
+      local version=$("$CLOUDFLARED_BIN" version 2>/dev/null || echo "unknown")
+      log_success "Using existing Cloudflared: $version"
+    else
+      log_success "Using existing Cloudflared binary"
+    fi
+    return 0
+  fi
+  
+  log "Setting up ephemeral Argo tunnel, downloading Cloudflared..."
+  
+  local arch=$(detect_arch)
+  local cf_arch=""
+  
+  case "$arch" in
+    amd64)
+      cf_arch="amd64"
+      ;;
+    arm64)
+      cf_arch="arm64"
+      ;;
+    armv7)
+      cf_arch="arm32"
+      ;;
+  esac
+  
+  log "Architecture mapping: $arch -> $cf_arch"
+  
+  local download_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${cf_arch}"
+  log "Download URL: $download_url"
+  
+  log "Downloading Cloudflared..."
+  if ! curl -L -o "$CLOUDFLARED_BIN" "$download_url"; then
+    log_fail "Failed to download Cloudflared from $download_url"
+    exit 1
+  fi
+  log_success "Download complete"
+  
+  chmod +x "$CLOUDFLARED_BIN"
+  
+  # Strip the binary
+  if command -v strip >/dev/null 2>&1; then
+    log "Stripping binary to reduce size..."
+    strip "$CLOUDFLARED_BIN" || true
+  fi
+  
+  log_success "Cloudflared installed successfully at: $CLOUDFLARED_BIN"
+  
+  # Verify installation
+  if [ -x "$CLOUDFLARED_BIN" ]; then
+    local version=$("$CLOUDFLARED_BIN" version 2>/dev/null || echo "unknown")
+    log "Installed version: $version"
+  fi
+}
+
+start_cloudflared() {
+  log_step 7 "Starting Cloudflared..."
+  
+  if [ "$DISABLE_ARGO" = "1" ]; then
+    log "Argo tunneling disabled"
+    log_success "Skipping Cloudflared startup"
+    return 0
+  fi
+  
+  if [ -n "$ARGO_DOMAIN" ] && [ -n "$ARGO_AUTH" ]; then
+    log "Using fixed Argo tunnel"
+    log_success "Skipping Cloudflared startup (using fixed tunnel configuration)"
+    return 0
+  fi
+  
+  log "Starting ephemeral Argo tunnel..."
+  
+  if [ ! -f "$CLOUDFLARED_BIN" ]; then
+    log_fail "Cloudflared binary not found at $CLOUDFLARED_BIN"
+    exit 1
+  fi
+  
+  local cf_log="${LOG_DIR}/cloudflared.log"
+  log "Log file: $cf_log"
+  log "Tunnel target: http://127.0.0.1:10000"
+  
+  # Start cloudflared with niceness optimization
+  log "Starting Cloudflared process..."
+  nice -n 10 "$CLOUDFLARED_BIN" tunnel --url http://127.0.0.1:10000 --no-autoupdate >"$cf_log" 2>&1 &
+  PID_CLOUDFLARED=$!
+  log "Cloudflared started with PID: $PID_CLOUDFLARED"
+  
+  # Wait for Cloudflared to initialize and extract the URL
+  log "Waiting 5 seconds for Cloudflared to initialize and establish tunnel..."
+  sleep 5
+  
+  # Verify the process is still running
+  if ! kill -0 "$PID_CLOUDFLARED" 2>/dev/null; then
+    log_fail "Cloudflared failed to start"
+    echo ""
+    log "Cloudflared log contents:"
+    echo "----------------------------------------"
+    cat "$cf_log"
+    echo "----------------------------------------"
+    exit 1
+  fi
+  
+  # Extract the URL from Cloudflared logs (try multiple patterns)
+  log "Extracting tunnel URL from logs..."
+  CLOUDFLARE_URL=$(grep -oP 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' "$cf_log" | head -1)
+  
+  if [ -z "$CLOUDFLARE_URL" ]; then
+    log "Warning: Could not extract Cloudflare tunnel URL from logs yet"
+    log "The tunnel might still be initializing, will retry later"
+    log ""
+    log "Current log contents:"
+    head -10 "$cf_log" | while read line; do
+      log "  $line"
+    done
+  else
+    log_success "Cloudflare tunnel established"
+    log "Tunnel URL: $CLOUDFLARE_URL"
+  fi
+  
+  log_success "Cloudflared is running (PID: $PID_CLOUDFLARED)"
+}
+
+# ============================================================================
+# Node.js HTTP Server Startup
+# ============================================================================
+
+start_node_server() {
+  log_step 8 "Starting Node.js HTTP server..."
+  
+  # Check if node is available
+  if ! command -v node >/dev/null 2>&1; then
+    log_fail "Node.js not found in PATH"
+    exit 1
+  fi
+  
+  local node_version=$(node --version 2>/dev/null || echo "unknown")
+  log "Node.js version: $node_version"
+  
+  # Check if index.js exists
+  if [ ! -f "$SCRIPT_DIR/index.js" ]; then
+    log_fail "index.js not found at $SCRIPT_DIR/index.js"
+    exit 1
+  fi
+  
+  local node_log="${LOG_DIR}/node.log"
+  log "Log file: $node_log"
+  log "Server port: $SERVER_PORT"
+  
+  cd "$SCRIPT_DIR"
+  log "Working directory: $PWD"
+  
+  log "Starting Node.js server..."
+  nice -n 10 node index.js >"$node_log" 2>&1 &
+  PID_NODE=$!
+  log "Node server started with PID: $PID_NODE"
+  
+  log "Waiting 1 second for server to initialize..."
+  sleep 1
+  
+  # Verify the process is still running
+  if kill -0 "$PID_NODE" 2>/dev/null; then
+    log_success "Node server is running (PID: $PID_NODE)"
+  else
+    log_fail "Node server failed to start"
+    echo ""
+    log "Node server log contents:"
+    echo "----------------------------------------"
+    cat "$node_log"
+    echo "----------------------------------------"
+    exit 1
+  fi
+  
+  # Show first few lines of log
+  if [ -s "$node_log" ]; then
+    log "Initial log output:"
+    head -10 "$node_log" | while read line; do
+      log "  $line"
+    done
+  fi
+}
+
+# ============================================================================
+# Subscription Generation
+# ============================================================================
+
+generate_subscription() {
+  log_step 9 "Generating VMess subscription..."
+  
+  local host=""
+  local port=""
+  
+  # Determine the best host/port based on active mode
+  if [ -n "$CLOUDFLARE_URL" ]; then
+    # Extract hostname from CloudFlare URL
+    host=$(echo "$CLOUDFLARE_URL" | sed 's|https://||' | sed 's|/.*||')
+    port=443
+    log "Mode: Cloudflare ephemeral tunnel"
+    log "  Host: $host"
+    log "  Port: $port"
+  elif [ -n "$ARGO_DOMAIN" ]; then
+    host="$ARGO_DOMAIN"
+    port=443
+    log "Mode: Fixed Argo domain"
+    log "  Host: $host"
+    log "  Port: $port"
+  elif [ -n "$CFIP" ]; then
+    host="$CFIP"
+    port="$CFPORT"
+    log "Mode: Cloudflare IP"
+    log "  Host: $host"
+    log "  Port: $port"
+  else
+    # Fallback to localhost for testing
+    host="127.0.0.1"
+    port=10000
+    log "Mode: Localhost (development/testing)"
+    log "  Host: $host"
+    log "  Port: $port"
+  fi
+  
+  # Build VMess object
+  log "Building VMess configuration..."
+  local vmess_json=$(cat <<EOF
+{
+  "v": "2",
+  "ps": "Xray-VMess",
+  "add": "${host}",
+  "port": "${port}",
+  "id": "${UUID}",
+  "aid": 0,
+  "net": "ws",
+  "type": "none",
+  "host": "${host}",
+  "path": "/ws",
+  "tls": "tls",
+  "sni": "${host}"
+}
+EOF
+  )
+  
+  # Base64 encode the VMess link
+  log "Encoding subscription link..."
+  local vmess_link=$(echo -n "vmess://$(echo -n "$vmess_json" | base64 -w 0)" | tr -d '\n')
+  
+  # Write subscription file
+  mkdir -p "$NPM_DIR"
+  echo "$vmess_link" > "${NPM_DIR}/sub.txt"
+  
+  if [ -f "${NPM_DIR}/sub.txt" ]; then
+    log_success "Subscription file created: ${NPM_DIR}/sub.txt"
+    log "Subscription link:"
+    echo "$vmess_link"
+  else
+    log_fail "Failed to create subscription file"
+    exit 1
+  fi
+}
+
+# ============================================================================
+# Process Management and Watchdog
+# ============================================================================
+
+cleanup() {
+  log "Cleaning up processes..."
+  
+  for pid in "$PID_NODE" "$PID_CLOUDFLARED" "$PID_XRAY"; do
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      log "Terminating process $pid..."
+      kill "$pid" 2>/dev/null || true
+      sleep 1
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+  done
+  
+  log "Cleanup complete"
+}
+
+watchdog_loop() {
+  log_step 10 "Starting watchdog..."
+  
+  log "Watchdog will monitor all processes every ${WATCHDOG_INTERVAL} seconds"
+  log "Processes being monitored:"
+  [ -n "$PID_XRAY" ] && log "  - Xray (PID: $PID_XRAY)"
+  [ -n "$PID_CLOUDFLARED" ] && log "  - Cloudflared (PID: $PID_CLOUDFLARED)"
+  [ -n "$PID_NODE" ] && log "  - Node server (PID: $PID_NODE)"
+  
+  log_success "Watchdog started"
+  
+  local check_count=0
+  while true; do
+    sleep "$WATCHDOG_INTERVAL"
+    check_count=$((check_count + 1))
+    
+    log "[Watchdog Check #$check_count]"
+    
+    # Check Xray
+    if [ -n "$PID_XRAY" ]; then
+      if kill -0 "$PID_XRAY" 2>/dev/null; then
+        log "  ✓ Xray is running (PID: $PID_XRAY)"
+      else
+        log_error "  ✗ Xray process died, restarting..."
+        start_xray || log_error "Failed to restart Xray"
+        PID_XRAY=$!
+      fi
+    fi
+    
+    # Check Cloudflared (if enabled and using ephemeral tunnel)
+    if [ "$DISABLE_ARGO" != "1" ] && [ -z "$ARGO_DOMAIN" ]; then
+      if [ -n "$PID_CLOUDFLARED" ]; then
+        if kill -0 "$PID_CLOUDFLARED" 2>/dev/null; then
+          log "  ✓ Cloudflared is running (PID: $PID_CLOUDFLARED)"
+        else
+          log_error "  ✗ Cloudflared process died, restarting..."
+          start_cloudflared || log_error "Failed to restart Cloudflared"
+          PID_CLOUDFLARED=$!
+        fi
+      fi
+    fi
+    
+    # Check Node server
+    if [ -n "$PID_NODE" ]; then
+      if kill -0 "$PID_NODE" 2>/dev/null; then
+        log "  ✓ Node server is running (PID: $PID_NODE)"
+      else
+        log_error "  ✗ Node server died, restarting..."
+        start_node_server || log_error "Failed to restart Node server"
+        PID_NODE=$!
+      fi
+    fi
+  done
+}
+
+# ============================================================================
+# Signal Handlers
+# ============================================================================
+
+handle_sigterm() {
+  log "Received SIGTERM"
+  cleanup
+  exit 0
+}
+
+handle_sigint() {
+  log "Received SIGINT"
+  cleanup
+  exit 0
+}
+
+# ============================================================================
+# Main Execution
+# ============================================================================
+
+main() {
+  echo ""
+  echo "=========================================="
+  echo "  sin-box Xray Runner - DEBUG VERSION"
+  echo "=========================================="
+  log "Initialization started at $(date)"
+  log "Script directory: $SCRIPT_DIR"
+  log "System: $(uname -s) $(uname -r) $(uname -m)"
+  echo "=========================================="
+  echo ""
+  
+  # Set up signal handlers
+  trap handle_sigterm SIGTERM
+  trap handle_sigint SIGINT
+  trap cleanup EXIT
+  
+  # Initialize
+  setup_directories
+  validate_environment
+  
+  # Setup and start services
+  download_xray
+  generate_xray_config
+  start_xray
+  
+  download_cloudflared
+  start_cloudflared
+  
+  start_node_server
+  
+  # Generate subscription
+  generate_subscription
+  
+  echo ""
+  echo "=================================================="
+  echo "  ✓ ALL SERVICES STARTED SUCCESSFULLY"
+  echo "=================================================="
+  log "Summary:"
+  log "  - Xray:        PID $PID_XRAY (port 10000)"
+  [ -n "$PID_CLOUDFLARED" ] && log "  - Cloudflared: PID $PID_CLOUDFLARED"
+  log "  - Node server: PID $PID_NODE (port $SERVER_PORT)"
+  log ""
+  log "Logs are available in: $LOG_DIR"
+  log "  - xray.log"
+  [ -n "$PID_CLOUDFLARED" ] && log "  - cloudflared.log"
+  log "  - node.log"
+  echo "=================================================="
+  echo ""
+  
+  # Start watchdog
+  watchdog_loop &
+  local pid_watchdog=$!
+  
+  # Keep the script alive
+  log "Main process will now wait for all background processes..."
+  log "Press Ctrl+C to stop all services"
+  wait
+}
+
+# Execute main
+main "$@"

@@ -1,0 +1,15 @@
+{
+  "name": "sin-box",
+  "version": "1.0.0",
+  "description": "Lightweight Xray + Cloudflared runner with VMess subscription server",
+  "engines": {
+    "node": ">=14"
+  },
+  "main": "index.js",
+  "scripts": {
+    "start": "bash start.sh"
+  },
+  "keywords": ["xray", "cloudflared", "vmess", "subscription"],
+  "author": "",
+  "license": "MIT"
+}
