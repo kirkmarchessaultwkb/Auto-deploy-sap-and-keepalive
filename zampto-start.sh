@@ -79,8 +79,8 @@ export SERVER_PORT=${SERVER_PORT:-'3000'}
 export UPLOAD_URL=${UPLOAD_URL:-''}
 
 # sing-box 监听地址（内部使用）
-# 默认：127.0.0.1
-export LISTEN_IP=${LISTEN_IP:-'127.0.0.1'}
+# 默认：::（监听所有 IPv4/IPv6 接口）
+export LISTEN_IP=${LISTEN_IP:-'::'}
 
 # sing-box 监听端口（内部使用）
 # 默认：8080
@@ -319,8 +319,24 @@ generate_config() {
       "tag": "direct"
     },
     {
-      "type": "blackhole",
+      "type": "block",
       "tag": "block"
+    },
+    {
+      "type": "urltest",
+      "tag": "auto",
+      "outbounds": ["cf-tunnel"],
+      "url": "http://www.gstatic.com/generate_204",
+      "interval": "1m",
+      "tolerance": 50
+    },
+    {
+      "type": "http",
+      "tag": "cf-tunnel",
+      "server": "127.0.0.1",
+      "server_port": 8001,
+      "username": "tunnel",
+      "password": "tunnel"
     }
   ],
   "route": {
@@ -332,6 +348,10 @@ generate_config() {
           "192.168.0.0/16"
         ],
         "outbound": "block"
+      },
+      {
+        "inbound": ["vmess-in"],
+        "outbound": "auto"
       }
     ],
     "final": "direct"
@@ -362,12 +382,194 @@ setup_cloudflared() {
     mkdir -p config/cloudflared
     
     if echo "$ARGO_AUTH" | grep -q "^{"; then
-        echo "$ARGO_AUTH" > config/cloudflared/cert.json
+        local credentials_file="config/cloudflared/credentials.json"
+        echo "$ARGO_AUTH" > "$credentials_file"
+        chmod 600 "$credentials_file" 2>/dev/null || true
+        
+        local tunnel_id=""
+        if command -v node >/dev/null 2>&1; then
+            tunnel_id=$(node -e 'const fs=require("fs");const path=process.argv[1];try{const raw=fs.readFileSync(path,"utf8");const data=JSON.parse(raw);const id=data.TunnelID||data.tunnel_id||data.tunnelId||"";if(!id)process.exit(1);process.stdout.write(id);}catch(e){process.exit(1);}' "$credentials_file" 2>/dev/null || true)
+        else
+            log_warn "Node.js not available, unable to parse Cloudflared credentials"
+        fi
+        
+        if [ -n "$tunnel_id" ]; then
+            echo "$tunnel_id" > config/cloudflared/tunnel.id
+            log_info "Detected Cloudflared tunnel ID: $tunnel_id"
+        else
+            log_warn "Failed to parse TunnelID from ARGO_AUTH credentials"
+        fi
     else
         echo "$ARGO_AUTH" > config/cloudflared/token
+        chmod 600 config/cloudflared/token 2>/dev/null || true
+        log_info "Cloudflared token saved"
     fi
     
     log_info "Cloudflared credentials configured"
+}
+
+# ============================================================================
+# 4.1. Start Cloudflared Tunnel
+# ============================================================================
+
+start_cloudflared_tunnel() {
+    log_info "Starting Cloudflared tunnel..."
+    
+    if [ ! -f "cloudflared" ]; then
+        log_warn "Cloudflared binary not found"
+        return 1
+    fi
+    
+    # Prepare log file
+    mkdir -p logs
+    CLOUDFLARED_LOG="logs/cloudflared.log"
+    > "$CLOUDFLARED_LOG"
+    
+    # Start cloudflared tunnel with appropriate authentication
+    if [ -n "$ARGO_AUTH" ] && [ -n "$ARGO_DOMAIN" ]; then
+        log_info "Starting fixed Cloudflared tunnel..."
+        log_info "Tunnel domain: $ARGO_DOMAIN"
+        
+        if echo "$ARGO_AUTH" | grep -q "^{"; then
+            # JSON format - use credentials file
+            local credentials_file="config/cloudflared/credentials.json"
+            local tunnel_id=$(cat config/cloudflared/tunnel.id 2>/dev/null || echo "")
+            
+            if [ -n "$tunnel_id" ] && [ -f "$credentials_file" ]; then
+                ./cloudflared tunnel --edge-ip-version auto --protocol http2 \
+                    --credentials-file "$credentials_file" \
+                    --url http://127.0.0.1:$LISTEN_PORT run "$tunnel_id" > "$CLOUDFLARED_LOG" 2>&1 &
+            else
+                # Fallback: try with ARGO_DOMAIN if tunnel_id not available
+                ./cloudflared tunnel --edge-ip-version auto --protocol http2 \
+                    --credentials-file "$credentials_file" \
+                    --url http://127.0.0.1:$LISTEN_PORT run > "$CLOUDFLARED_LOG" 2>&1 &
+            fi
+        else
+            # Token format
+            ./cloudflared tunnel --edge-ip-version auto --protocol http2 \
+                run --token "$ARGO_AUTH" > "$CLOUDFLARED_LOG" 2>&1 &
+        fi
+        
+        CLOUDFLARED_PID=$!
+        log_info "Cloudflared started with PID: $CLOUDFLARED_PID (fixed tunnel)"
+        
+        # Wait a moment for tunnel to establish
+        sleep 5
+        
+        # Verify tunnel is running
+        if ps -p $CLOUDFLARED_PID > /dev/null 2>&1; then
+            log_info "✅ Cloudflared tunnel established: https://$ARGO_DOMAIN"
+            echo "$ARGO_DOMAIN" > .argo_domain
+            return 0
+        else
+            log_error "Cloudflared tunnel failed to start"
+            cat "$CLOUDFLARED_LOG" | tail -20
+            return 1
+        fi
+    else
+        log_info "Starting temporary Cloudflared tunnel..."
+        
+        # Temporary tunnel (Quick Tunnel)
+        ./cloudflared tunnel --edge-ip-version auto --protocol http2 \
+            --url http://127.0.0.1:$LISTEN_PORT --no-autoupdate > "$CLOUDFLARED_LOG" 2>&1 &
+        
+        CLOUDFLARED_PID=$!
+        log_info "Cloudflared started with PID: $CLOUDFLARED_PID (temporary tunnel)"
+        
+        # Wait for tunnel URL to appear in logs
+        log_info "Waiting for tunnel URL..."
+        for i in {1..30}; do
+            if grep -q "trycloudflare.com" "$CLOUDFLARED_LOG" 2>/dev/null; then
+                TEMP_DOMAIN=$(grep -oE 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com' "$CLOUDFLARED_LOG" | head -1 | sed 's|https://||')
+                if [ -n "$TEMP_DOMAIN" ]; then
+                    log_info "✅ Temporary tunnel URL: https://$TEMP_DOMAIN"
+                    ARGO_DOMAIN="$TEMP_DOMAIN"
+                    echo "$TEMP_DOMAIN" > .argo_domain
+                    return 0
+                fi
+            fi
+            sleep 2
+        done
+        
+        log_warn "Could not get tunnel URL from cloudflared logs"
+        cat "$CLOUDFLARED_LOG" | tail -20
+        return 1
+    fi
+}
+
+# ============================================================================
+# 4.2. Generate Subscription File
+# ============================================================================
+
+generate_subscription() {
+    log_info "Generating subscription file..."
+    
+    # Get Argo domain
+    local domain=""
+    if [ -n "$ARGO_DOMAIN" ]; then
+        domain="$ARGO_DOMAIN"
+    elif [ -f ".argo_domain" ]; then
+        domain=$(cat .argo_domain)
+    else
+        log_warn "No Argo domain available, subscription generation skipped"
+        return 1
+    fi
+    
+    # Remove https:// prefix if present
+    domain="${domain#https://}"
+    domain="${domain#http://}"
+    
+    log_info "Using domain: $domain"
+    
+    # Generate Vmess configuration
+    local vmess_json="{
+  \"v\": \"2\",
+  \"ps\": \"${NAME}-vmess\",
+  \"add\": \"${CFIP}\",
+  \"port\": \"${CFPORT}\",
+  \"id\": \"${UUID}\",
+  \"aid\": \"0\",
+  \"scy\": \"auto\",
+  \"net\": \"ws\",
+  \"type\": \"none\",
+  \"host\": \"${domain}\",
+  \"path\": \"/ws\",
+  \"tls\": \"tls\",
+  \"sni\": \"${domain}\",
+  \"alpn\": \"\"
+}"
+    
+    # Base64 encode (remove line breaks)
+    local vmess_link="vmess://$(echo -n "$vmess_json" | base64 | tr -d '\n')"
+    
+    # Ensure directory exists
+    mkdir -p "$FILE_PATH"
+    
+    # Save subscription
+    echo "$vmess_link" > "$FILE_PATH/sub.txt"
+    
+    if [ -f "$FILE_PATH/sub.txt" ]; then
+        log_info "✅ Subscription saved to $FILE_PATH/sub.txt"
+        log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        log_info "📋 Vmess 订阅链接:"
+        log_info "   $vmess_link"
+        log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        log_info "🌐 Argo 隧道地址: https://$domain"
+        log_info "🔑 UUID: $UUID"
+        log_info "📡 优选 IP: $CFIP:$CFPORT"
+        log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        
+        # Send Telegram notification if configured
+        if [ -n "$BOT_TOKEN" ] && [ -n "$CHAT_ID" ]; then
+            send_telegram_notification "✅ zampto 节点部署成功\n🌐 域名: https://$domain\n🔑 UUID: $UUID" "success"
+        fi
+        
+        return 0
+    else
+        log_error "Failed to save subscription file"
+        return 1
+    fi
 }
 
 # ============================================================================
@@ -541,6 +743,36 @@ main() {
     fi
     
     send_telegram_notification "sing-box service starting on zampto Node.js platform" "info"
+    
+    # Start Nezha agent if configured
+    if [ -f "nezha-agent" ] && [ -n "$NEZHA_SERVER" ] && [ -n "$NEZHA_KEY" ]; then
+        log_info "Starting Nezha monitoring agent..."
+        
+        # Determine Nezha version based on NEZHA_SERVER format
+        if echo "$NEZHA_SERVER" | grep -q ":"; then
+            # v1 version (port in domain)
+            ./nezha-agent -s "$NEZHA_SERVER" -p "$NEZHA_KEY" --disable-auto-update --disable-force-update > logs/nezha.log 2>&1 &
+            NEZHA_PID=$!
+            log_info "Nezha agent (v1) started with PID: $NEZHA_PID"
+        else
+            # v0 version
+            NEZHA_PORT="${NEZHA_PORT:-5555}"
+            ./nezha-agent -s "$NEZHA_SERVER:$NEZHA_PORT" -p "$NEZHA_KEY" --report-delay 60 > logs/nezha.log 2>&1 &
+            NEZHA_PID=$!
+            log_info "Nezha agent (v0) started with PID: $NEZHA_PID"
+        fi
+    fi
+    
+    # Start Cloudflared tunnel
+    log_info "Starting Cloudflared tunnel..."
+    start_cloudflared_tunnel
+    
+    # Wait a moment for tunnel to stabilize
+    sleep 3
+    
+    # Generate subscription file
+    log_info "Generating subscription..."
+    generate_subscription
     
     log_info "Starting sing-box service with CPU optimizations..."
     log_info "- Process Priority: nice -n 19, ionice -c 3"
