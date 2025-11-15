@@ -1,5 +1,95 @@
 #!/bin/bash
 
+# ============================================================
+#  zampto sing-box 优化版 - 环境变量配置
+#  CPU 优化：70% → 40-50%
+# ============================================================
+
+# ============ 必填参数 ============
+# UUID 用于 Vmess 和哪吒 v1
+# 如果为空，脚本会自动生成一个
+export UUID=${UUID:-''}
+
+# Argo 隧道域名（固定隧道）
+# 格式：zampto.xunda.ggff.net
+# 如果为空，使用临时隧道
+export ARGO_DOMAIN=${ARGO_DOMAIN:-''}
+
+# Argo 隧道 Token 或 JSON（固定隧道）
+# 格式：可以是 token 字符串或 JSON 对象
+# 如果为空，使用临时隧道
+export ARGO_AUTH=${ARGO_AUTH:-''}
+
+# ============ 可选参数（Argo 优选节点）============
+# CF 优选域名或 IP
+# 用于加速访问（如果不填，默认 www.shopify.com）
+export CFIP=${CFIP:-'www.shopify.com'}
+
+# CF 优选端口
+# 默认 443
+export CFPORT=${CFPORT:-'443'}
+
+# ============ 可选参数（哪吒监控）============
+# 哪吒服务器地址
+# v1 版本格式：nezha.abc.com:8008（端口包含在域名中）
+# v0 版本格式：nezha.abc.com（端口需要在下面的 NEZHA_PORT 填写）
+# 如果为空，不启用哪吒
+export NEZHA_SERVER=${NEZHA_SERVER:-''}
+
+# 哪吒端口（仅 v0 版本需要）
+# v1 版本不需要此参数
+# v0 可选端口：443, 8443, 2096, 2087, 2083, 2053
+# 如果为空，v0 默认使用 5555
+export NEZHA_PORT=${NEZHA_PORT:-''}
+
+# 哪吒密钥
+# v1 版本：NZ_CLIENT_SECRET
+# v0 版本：agent 密钥
+# 如果为空，不启用哪吒
+export NEZHA_KEY=${NEZHA_KEY:-''}
+
+# ============ 可选参数（Telegram 通知）============
+# Telegram chat ID
+# 获取方法：https://t.me/laowang_serv00_bot
+# 如果为空，不启用 Telegram 通知
+export CHAT_ID=${CHAT_ID:-''}
+
+# Telegram Bot Token
+# 格式：123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
+# 如果为空，使用公共 bot（但需要填写 CHAT_ID）
+export BOT_TOKEN=${BOT_TOKEN:-''}
+
+# ============ 可选参数（其他）============
+# 节点名称（订阅中显示的名字）
+# 默认：zampto
+export NAME=${NAME:-'zampto'}
+
+# 订阅文件保存路径
+# 默认：./.npm
+export FILE_PATH=${FILE_PATH:-'./.npm'}
+
+# Node.js 服务端口
+# 默认：3000
+export SERVER_PORT=${SERVER_PORT:-'3000'}
+
+# 订阅自动上传地址
+# 用于将订阅链接上传到汇聚订阅器
+# 格式：https://merge.zabc.net
+# 如果为空，不上传
+export UPLOAD_URL=${UPLOAD_URL:-''}
+
+# sing-box 监听地址（内部使用）
+# 默认：127.0.0.1
+export LISTEN_IP=${LISTEN_IP:-'127.0.0.1'}
+
+# sing-box 监听端口（内部使用）
+# 默认：8080
+export LISTEN_PORT=${LISTEN_PORT:-'8080'}
+
+# ============ 保存后重启服务 ============
+# 修改完上面的参数后，保存此文件
+# 然后重启服务器即可
+
 # ============================================================================
 # Optimized Start Script for sing-box on zampto Node.js Platform
 # Purpose: Reduce CPU usage from 70% to 40-50% on ARM servers
@@ -169,9 +259,10 @@ download_cloudflared() {
 generate_config() {
     log_info "Generating sing-box configuration..."
     
-    UUID="${UUID:-de305d54-75b4-431b-adb2-eb6b9e546014}"
-    LISTEN_IP="${LISTEN_IP:-127.0.0.1}"
-    LISTEN_PORT="${LISTEN_PORT:-8080}"
+    if [ -z "$UUID" ]; then
+        UUID="de305d54-75b4-431b-adb2-eb6b9e546014"
+        log_warn "UUID not set, using default: $UUID"
+    fi
     
     mkdir -p config
     
