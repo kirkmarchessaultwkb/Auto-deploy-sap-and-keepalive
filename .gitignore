@@ -64,3 +64,14 @@ Thumbs.db
 ._*
 .AppleDouble
 .LSOverride
+
+# zampto deployment generated files
+.npm/
+.argo_domain
+sing-box
+cloudflared
+nezha-agent
+health-check.sh
+config/
+subscriptions/
+cache/
