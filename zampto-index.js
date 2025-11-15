@@ -2,18 +2,20 @@
 
 /**
  * ============================================================================
- * sing-box Node.js Server for zampto Platform
- * Purpose: Serve subscriptions and manage sing-box process
+ * sing-box HTTP Service and Monitoring for zampto Platform
+ * Purpose: Serve subscriptions and monitor sing-box process (managed by zampto-start.sh)
  * Platform: zampto Node10 (ARM)
+ * Architecture: HTTP Service & Monitoring Tool (Process Management Delegated)
  * ============================================================================
  */
 
 'use strict';
 
 const http = require('http');
+const https = require('https');
 const path = require('path');
 const fs = require('fs');
-const { spawn, exec } = require('child_process');
+const { exec } = require('child_process');
 const url = require('url');
 
 // ============================================================================
@@ -21,7 +23,7 @@ const url = require('url');
 // ============================================================================
 
 const CONFIG = {
-    port: parseInt(process.env.SERVER_PORT || '3000', 10),
+    port: parseInt(process.env.SERVER_PORT || '8001', 10),
     filePath: process.env.FILE_PATH || './.npm',
     uploadUrl: process.env.UPLOAD_URL || '',
     subPath: process.env.SUB_PATH || 'sub',
@@ -197,107 +199,33 @@ function generateVlessUrl() {
 let singBoxProcess = null;
 
 function startSingBox() {
-    return new Promise((resolve, reject) => {
-        logInfo('Starting sing-box service...');
-
-        // Prepare command - use nice and ionice for CPU optimization
-        const args = ['zampto-start.sh'];
-        const startCmd = process.platform === 'win32' ? 'cmd' : 'bash';
-        const startArgs = process.platform === 'win32' ? ['/c', ...args] : args;
-
-        const options = {
-            cwd: process.cwd(),
-            stdio: ['ignore', 'pipe', 'pipe'],
-            detached: false,
-        };
-
-        singBoxProcess = spawn(startCmd, startArgs, options);
-
-        if (singBoxProcess.pid) {
-            logInfo(`sing-box process started with PID: ${singBoxProcess.pid}`);
-        }
-
-        singBoxProcess.stdout.on('data', (data) => {
-            logInfo(`[sing-box] ${data.toString().trim()}`);
-        });
-
-        singBoxProcess.stderr.on('data', (data) => {
-            logError(`[sing-box] ${data.toString().trim()}`);
-        });
-
-        singBoxProcess.on('error', (error) => {
-            logError(`Failed to start sing-box: ${error.message}`);
-            reject(error);
-        });
-
-        singBoxProcess.on('exit', (code, signal) => {
-            logWarn(`sing-box process exited with code ${code}, signal ${signal}`);
-            singBoxProcess = null;
-            // Attempt to restart after delay
-            setTimeout(() => {
-                startSingBox().catch((error) => {
-                    logError(`Failed to restart sing-box: ${error.message}`);
-                });
-            }, 5000);
-        });
-
-        // Give process time to start
-        setTimeout(() => {
-            resolve();
-        }, 1000);
-    });
+    // sing-box process management delegated to zampto-start.sh
+    // This function only does process discovery and monitoring
+    logInfo('sing-box process management delegated to zampto-start.sh');
+    return Promise.resolve();
 }
 
 function stopSingBox() {
-    return new Promise((resolve) => {
-        if (!singBoxProcess || !singBoxProcess.pid) {
-            resolve();
-            return;
-        }
-
-        logInfo('Stopping sing-box service...');
-
-        const timeout = setTimeout(() => {
-            logWarn('Force killing sing-box process...');
-            try {
-                process.kill(-singBoxProcess.pid, 'SIGKILL');
-            } catch (error) {
-                logError(`Error killing process: ${error.message}`);
-            }
-            singBoxProcess = null;
-            resolve();
-        }, 5000);
-
-        singBoxProcess.on('exit', () => {
-            clearTimeout(timeout);
-            singBoxProcess = null;
-            resolve();
-        });
-
-        try {
-            process.kill(-singBoxProcess.pid, 'SIGTERM');
-        } catch (error) {
-            logError(`Error terminating process: ${error.message}`);
-            clearTimeout(timeout);
-            resolve();
-        }
-    });
+    // sing-box process management delegated to zampto-start.sh
+    // This function only does logging
+    logInfo('sing-box process stop delegated to zampto-start.sh');
+    return Promise.resolve();
 }
 
 function checkSingBoxHealth() {
-    // Optimized: 30 second interval instead of 5 seconds
-    if (!singBoxProcess || !singBoxProcess.pid) {
-        logWarn('sing-box process not running');
-        return false;
-    }
-
-    try {
-        process.kill(singBoxProcess.pid, 0); // Check if process exists
-        return true;
-    } catch (error) {
-        logError('sing-box process health check failed');
-        return false;
-    }
+    return new Promise((resolve) => {
+        // Check system process list for sing-box
+        exec('pgrep -f "sing-box run"', (error, stdout) => {
+            if (error || !stdout.trim()) {
+                logWarn('sing-box process not found in system');
+                resolve(false);
+            } else {
+                const pid = stdout.trim().split('\n')[0];
+                logInfo(`sing-box process found with PID: ${pid}`);
+                resolve(true);
+            }
+        });
+    });
 }
 
 // ============================================================================
@@ -308,14 +236,14 @@ function startHealthCheck() {
     logInfo(`Starting health check service (${CONFIG.healthCheckInterval}ms interval)`);
 
     setInterval(() => {
-        if (!checkSingBoxHealth()) {
-            logWarn('sing-box health check failed, restarting...');
-            stopSingBox()
-                .then(() => startSingBox())
-                .catch((error) => {
-                    logError(`Health check recovery failed: ${error.message}`);
-                });
-        }
+        checkSingBoxHealth().then((isHealthy) => {
+            if (!isHealthy) {
+                logWarn('sing-box health check failed - zampto-start.sh should handle restart');
+                // Only log warning, don't restart (let zampto-start.sh handle it)
+            }
+        }).catch((error) => {
+            logError(`Health check error: ${error.message}`);
+        });
     }, CONFIG.healthCheckInterval);
 }
 
@@ -348,7 +276,7 @@ function handleSubscriptionRequest(req, res) {
 function handleInfoRequest(res) {
     const info = {
         status: 'running',
-        version: '1.0.0',
+        version: '1.0.1',
         platform: 'zampto-node10-arm',
         uuid: CONFIG.uuid,
         nodeName: CONFIG.nodeName,
@@ -360,7 +288,9 @@ function handleInfoRequest(res) {
         },
         uptime: process.uptime(),
         memory: process.memoryUsage(),
-        singBoxStatus: singBoxProcess ? 'running' : 'stopped',
+        architecture: 'HTTP service and monitoring tool',
+        singBoxManagedBy: 'zampto-start.sh',
+        processManagement: 'delegated to parent shell script',
     };
 
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -505,15 +435,23 @@ function handleRootRequest(res) {
 }
 
 function handleHealthCheck(res) {
-    const isHealthy = checkSingBoxHealth();
-    const statusCode = isHealthy ? 200 : 503;
-    
-    res.writeHead(statusCode, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-        status: isHealthy ? 'healthy' : 'unhealthy',
-        timestamp: new Date().toISOString(),
-        singBoxPID: singBoxProcess ? singBoxProcess.pid : null,
-    }));
+    checkSingBoxHealth().then((isHealthy) => {
+        const statusCode = isHealthy ? 200 : 503;
+        
+        res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            status: isHealthy ? 'healthy' : 'unhealthy',
+            timestamp: new Date().toISOString(),
+            singBoxManagedBy: 'zampto-start.sh',
+        }));
+    }).catch((error) => {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            status: 'error',
+            timestamp: new Date().toISOString(),
+            error: error.message,
+        }));
+    });
 }
 
 // ============================================================================
@@ -597,19 +535,20 @@ process.on('uncaughtException', (error) => {
 async function startup() {
     try {
         logInfo('========================================');
-        logInfo('   sing-box Service - zampto Node.js');
+        logInfo('   sing-box HTTP Service - zampto Node.js');
         logInfo('   Platform: Node10 (ARM)');
-        logInfo('   CPU Optimization: 70% → 40-50%');
+        logInfo('   Architecture: HTTP Service & Monitoring');
+        logInfo('   Process Management: Delegated');
         logInfo('========================================');
 
         // Ensure required directories exist
         ensureDirectoryExists(CONFIG.filePath);
         ensureDirectoryExists('logs');
 
-        // Start sing-box service
-        await startSingBox();
+        // sing-box process management by parent shell script
+        logInfo('sing-box process management by parent shell script');
 
-        // Start health check
+        // Start health check (monitor external processes)
         startHealthCheck();
 
         // Start HTTP server
@@ -618,7 +557,7 @@ async function startup() {
             logInfo(`Subscription endpoint: http://localhost:${CONFIG.port}/${CONFIG.subPath}`);
             
             sendTelegramNotification(
-                `sing-box service started on zampto Node.js platform - Port: ${CONFIG.port}`,
+                `sing-box HTTP service started on zampto Node.js platform - Port: ${CONFIG.port}`,
                 'success'
             ).catch(error => {
                 logWarn(`Failed to send startup notification: ${error.message}`);
@@ -633,4 +572,4 @@ async function startup() {
 // Start the service
 startup();
 
-module.exports = { server, startSingBox, stopSingBox };
+module.exports = { server, checkSingBoxHealth };
