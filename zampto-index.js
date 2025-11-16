@@ -276,7 +276,7 @@ function handleSubscriptionRequest(req, res) {
 function handleInfoRequest(res) {
     const info = {
         status: 'running',
-        version: '1.0.1',
+        version: '1.0.3',
         platform: 'zampto-node10-arm',
         uuid: CONFIG.uuid,
         nodeName: CONFIG.nodeName,
@@ -572,4 +572,4 @@ async function startup() {
 // Start the service
 startup();
 
-module.exports = { server, checkSingBoxHealth };
+module.exports = { server, startSingBox, stopSingBox };
