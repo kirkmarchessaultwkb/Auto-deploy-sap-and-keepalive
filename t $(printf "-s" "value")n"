@@ -1,0 +1,301 @@
+[1mdiff --git a/argo-diagnostic.sh b/argo-diagnostic.sh[m
+[1mindex 21c2656..9979d95 100755[m
+[1m--- a/argo-diagnostic.sh[m
+[1m+++ b/argo-diagnostic.sh[m
+[36m@@ -31,6 +31,22 @@[m [mlog_debug() {[m
+     fi[m
+ }[m
+ [m
+[32m+[m[32mformat_secret_value() {[m
+[32m+[m[32m    local value="$1"[m
+[32m+[m
+[32m+[m[32m    if [[ -z "$value" ]]; then[m
+[32m+[m[32m        printf "%s" "(not set)"[m
+[32m+[m[32m        return[m
+[32m+[m[32m    fi[m
+[32m+[m
+[32m+[m[32m    local length=${#value}[m
+[32m+[m[32m    if (( length <= 10 )); then[m
+[32m+[m[32m        printf "%s" "$value"[m
+[32m+[m[32m    else[m
+[32m+[m[32m        printf "%s... (loaded)" "${value:0:6}"[m
+[32m+[m[32m    fi[m
+[32m+[m[32m}[m
+[32m+[m
+ # =============================================================================[m
+ # Configuration[m
+ # =============================================================================[m
+[36m@@ -73,36 +89,44 @@[m [mprint_footer() {[m
+ [m
+ load_config() {[m
+     log_info "Loading configuration from $CONFIG_FILE..."[m
+[31m-    [m
+[32m+[m
+     if [[ ! -f "$CONFIG_FILE" ]]; then[m
+         log_warn "Config file not found: $CONFIG_FILE"[m
+         log_info "Using default values"[m
+         return 1[m
+     fi[m
+[31m-    [m
+[32m+[m
+     log_info "Config file found, parsing..."[m
+[31m-    [m
+[31m-    # Try using jq first[m
+[32m+[m
+     if command -v jq >/dev/null 2>&1; then[m
+         log_debug "Using jq for JSON parsing"[m
+[31m-        CF_DOMAIN=$(jq -r '.CF_DOMAIN // empty' "$CONFIG_FILE" 2>/dev/null)[m
+[31m-        CF_TOKEN=$(jq -r '.CF_TOKEN // empty' "$CONFIG_FILE" 2>/dev/null)[m
+[31m-        UUID=$(jq -r '.UUID // empty' "$CONFIG_FILE" 2>/dev/null)[m
+[31m-        ARGO_PORT=$(jq -r '.ARGO_PORT // "27039"' "$CONFIG_FILE" 2>/dev/null)[m
+[32m+[m[32m        CF_DOMAIN=$(jq -r '.CF_DOMAIN // .cf_domain // empty' "$CONFIG_FILE" 2>/dev/null)[m
+[32m+[m[32m        CF_TOKEN=$(jq -r '.CF_TOKEN // .cf_token // empty' "$CONFIG_FILE" 2>/dev/null)[m
+[32m+[m[32m        UUID=$(jq -r '.UUID // .uuid // empty' "$CONFIG_FILE" 2>/dev/null)[m
+[32m+[m[32m        ARGO_PORT=$(jq -r '.ARGO_PORT // .argo_port // "27039"' "$CONFIG_FILE" 2>/dev/null)[m
+     else[m
+[31m-        log_debug "jq not available, using grep fallback"[m
+[31m-        CF_DOMAIN=$(grep -o '"CF_DOMAIN"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" 2>/dev/null | sed 's/.*"\([^"]*\)".*/\1/' || echo "")[m
+[31m-        CF_TOKEN=$(grep -o '"CF_TOKEN"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" 2>/dev/null | sed 's/.*"\([^"]*\)".*/\1/' || echo "")[m
+[31m-        UUID=$(grep -o '"UUID"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" 2>/dev/null | sed 's/.*"\([^"]*\)".*/\1/' || echo "")[m
+[31m-        ARGO_PORT=$(grep -o '"ARGO_PORT"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" 2>/dev/null | sed 's/.*"\([^"]*\)".*/\1/' || echo "27039")[m
+[32m+[m[32m        log_debug "jq not available, using fallback parser"[m
+[32m+[m[32m        CF_DOMAIN=$(grep -oE '"(CF_DOMAIN|cf_domain)"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" 2>/dev/null | head -1 | sed -E 's/.*"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/')[m
+[32m+[m[32m        CF_TOKEN=$(grep -oE '"(CF_TOKEN|cf_token)"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" 2>/dev/null | head -1 | sed -E 's/.*"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/')[m
+[32m+[m[32m        UUID=$(grep -oE '"(UUID|uuid)"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" 2>/dev/null | head -1 | sed -E 's/.*"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/')[m
+[32m+[m[32m        ARGO_PORT=$(grep -oE '"(ARGO_PORT|argo_port)"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" 2>/dev/null | head -1 | sed -E 's/.*"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/')[m
+[32m+[m[32m        if [[ -z "$ARGO_PORT" ]]; then[m
+[32m+[m[32m            ARGO_PORT=$(grep -oE '"(ARGO_PORT|argo_port)"[[:space:]]*:[[:space:]]*[^,}[:space:]]+' "$CONFIG_FILE" 2>/dev/null | head -1 | sed -E 's/.*:[[:space:]]*//' | sed -E 's/[",]*$//')[m
+[32m+[m[32m        fi[m
+     fi[m
+[31m-    [m
+[32m+[m
+[32m+[m[32m    ARGO_PORT=${ARGO_PORT:-27039}[m
+[32m+[m
+[32m+[m[32m    if [[ -n "$ARGO_PORT" ]]; then[m
+[32m+[m[32m        KEEPALIVE_PORT=$ARGO_PORT[m
+[32m+[m[32m    fi[m
+[32m+[m
+     log_info "Configuration loaded:"[m
+     log_info "  CF_DOMAIN: ${CF_DOMAIN:-'(not set)'}"[m
+[31m-    log_info "  CF_TOKEN: ${CF_TOKEN:+'(set)'}${CF_TOKEN:-'(not set)'}"[m
+[31m-    log_info "  UUID: ${UUID:+'(set)'}${UUID:-'(not set)'}"[m
+[32m+[m[32m    log_info "  CF_TOKEN: $(format_secret_value "$CF_TOKEN")"[m
+[32m+[m[32m    log_info "  UUID: ${UUID:-'(not set)'}"[m
+     log_info "  ARGO_PORT: $ARGO_PORT"[m
+[31m-    [m
+[32m+[m
+     return 0[m
+ }[m
+ [m
+[1mdiff --git a/start.sh b/start.sh[m
+[1mindex 6ce2a1e..c75eff7 100755[m
+[1m--- a/start.sh[m
+[1m+++ b/start.sh[m
+[36m@@ -12,6 +12,14 @@[m
+ [m
+ CONFIG_FILE="/home/container/config.json"[m
+ [m
+[32m+[m[32mCF_DOMAIN=""[m
+[32m+[m[32mCF_TOKEN=""[m
+[32m+[m[32mUUID=""[m
+[32m+[m[32mNEZHA_SERVER=""[m
+[32m+[m[32mNEZHA_PORT="5555"[m
+[32m+[m[32mNEZHA_KEY=""[m
+[32m+[m[32mARGO_PORT="27039"[m
+[32m+[m
+ # Log functions with timestamps[m
+ log_info() {[m
+     echo "[$(date +'%Y-%m-%d %H:%M:%S')] [INFO] $1"[m
+[36m@@ -38,22 +46,111 @@[m [mextract_json_value() {[m
+     local file=$1[m
+     local key=$2[m
+     local default_value=${3:-""}[m
+[31m-    [m
+[32m+[m
+     if [[ ! -f "$file" ]]; then[m
+[31m-        echo "$default_value"[m
+[32m+[m[32m        printf '%s\n' "$default_value"[m
+         return 1[m
+     fi[m
+[31m-    [m
+[31m-    # 使用 grep + sed 提取 JSON 值[m
+[31m-    local value=$(grep "\"$key\"" "$file" | sed 's/.*"\([^"]*\)".*/\1/' | head -1)[m
+[31m-    [m
+[31m-    # 如果没有找到值，返回默认值[m
+[32m+[m
+[32m+[m[32m    local candidates=("$key")[m
+[32m+[m[32m    local uppercase_key="${key^^}"[m
+[32m+[m[32m    local lowercase_key="${key,,}"[m
+[32m+[m
+[32m+[m[32m    if [[ "$uppercase_key" != "$key" ]]; then[m
+[32m+[m[32m        candidates+=("$uppercase_key")[m
+[32m+[m[32m    fi[m
+[32m+[m[32m    if [[ "$lowercase_key" != "$key" && "$lowercase_key" != "$uppercase_key" ]]; then[m
+[32m+[m[32m        candidates+=("$lowercase_key")[m
+[32m+[m[32m    fi[m
+[32m+[m
+[32m+[m[32m    local python_output=""[m
+[32m+[m[32m    local python_status=1[m
+[32m+[m
+[32m+[m[32m    if command -v python3 >/dev/null 2>&1; then[m
+[32m+[m[32m        python_output=$(python3 - "$file" "${candidates[@]}" <<'PYCODE'[m
+[32m+[m[32mimport json[m
+[32m+[m[32mimport sys[m
+[32m+[m
+[32m+[m[32mfilename = sys.argv[1][m
+[32m+[m[32mkeys = sys.argv[2:][m
+[32m+[m
+[32m+[m[32mtry:[m
+[32m+[m[32m    with open(filename, 'r', encoding='utf-8') as fh:[m
+[32m+[m[32m        data = json.load(fh)[m
+[32m+[m[32mexcept Exception:[m
+[32m+[m[32m    sys.exit(2)[m
+[32m+[m
+[32m+[m[32mfor key in keys:[m
+[32m+[m[32m    if key in data:[m
+[32m+[m[32m        value = data[key][m
+[32m+[m[32m        if value is None:[m
+[32m+[m[32m            value = ""[m
+[32m+[m[32m        if isinstance(value, (dict, list)):[m
+[32m+[m[32m            import json as json_module[m
+[32m+[m[32m            print(json_module.dumps(value, ensure_ascii=False))[m
+[32m+[m[32m        else:[m
+[32m+[m[32m            print(value)[m
+[32m+[m[32m        sys.exit(0)[m
+[32m+[m
+[32m+[m[32msys.exit(1)[m
+[32m+[m[32mPYCODE[m
+[32m+[m[32m        )[m
+[32m+[m[32m        python_status=$?[m
+[32m+[m[32m    fi[m
+[32m+[m
+[32m+[m[32m    if [[ $python_status -eq 0 ]]; then[m
+[32m+[m[32m        printf '%s\n' "$python_output"[m
+[32m+[m[32m        return 0[m
+[32m+[m[32m    fi[m
+[32m+[m
+[32m+[m[32m    local value=""[m
+[32m+[m[32m    for candidate in "${candidates[@]}"; do[m
+[32m+[m[32m        value=$(awk -v key="$candidate" '[m
+[32m+[m[32m            match($0, "\"" key "\"[[:space:]]*:[[:space:]]*\"([^\"]*)\"", arr) {[m
+[32m+[m[32m                print arr[1][m
+[32m+[m[32m                exit[m
+[32m+[m[32m            }[m
+[32m+[m[32m        ' "$file")[m
+[32m+[m[32m        if [[ -n "$value" ]]; then[m
+[32m+[m[32m            break[m
+[32m+[m[32m        fi[m
+[32m+[m
+[32m+[m[32m        value=$(awk -v key="$candidate" '[m
+[32m+[m[32m            match($0, "\"" key "\"[[:space:]]*:[[:space:]]*([^,}[m[41m 	[m
+[32m+[m[32m]+)", arr) {[m
+[32m+[m[32m                print arr[1][m
+[32m+[m[32m                exit[m
+[32m+[m[32m            }[m
+[32m+[m[32m        ' "$file")[m
+[32m+[m[32m        if [[ -n "$value" ]]; then[m
+[32m+[m[32m            value=${value//\"/}[m
+[32m+[m[32m            break[m
+[32m+[m[32m        fi[m
+[32m+[m[32m    done[m
+[32m+[m
+     if [[ -z "$value" ]]; then[m
+[31m-        echo "$default_value"[m
+[32m+[m[32m        printf '%s\n' "$default_value"[m
+         return 1[m
+[32m+[m[32m    fi[m
+[32m+[m
+[32m+[m[32m    printf '%s\n' "$value"[m
+[32m+[m[32m    return 0[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mformat_sensitive_value() {[m
+[32m+[m[32m    local value="$1"[m
+[32m+[m[32m    local placeholder=${2:-"'not set'"}[m
+[32m+[m
+[32m+[m[32m    if [[ -z "$value" ]]; then[m
+[32m+[m[32m        printf "%s" "$placeholder"[m
+[32m+[m[32m        return[m
+[32m+[m[32m    fi[m
+[32m+[m
+[32m+[m[32m    local length=${#value}[m
+[32m+[m[32m    if (( length <= 10 )); then[m
+[32m+[m[32m        printf "%s (loaded)" "$value"[m
+     else[m
+[31m-        echo "$value"[m
+[31m-        return 0[m
+[32m+[m[32m        printf "%s... (loaded)" "${value:0:6}"[m
+     fi[m
+ }[m
+ [m
+[36m@@ -63,41 +160,44 @@[m [mextract_json_value() {[m
+ [m
+ load_config() {[m
+     log_info "Loading configuration from: $CONFIG_FILE"[m
+[31m-    [m
+[32m+[m
+     if [[ ! -f "$CONFIG_FILE" ]]; then[m
+         log_error "Configuration file not found: $CONFIG_FILE"[m
+         return 1[m
+     fi[m
+[31m-    [m
+[31m-    # 提取配置值（不依赖 jq）[m
+[31m-    CF_DOMAIN=$(extract_json_value "$CONFIG_FILE" "CF_DOMAIN")[m
+[31m-    CF_TOKEN=$(extract_json_value "$CONFIG_FILE" "CF_TOKEN")[m
+[31m-    UUID=$(extract_json_value "$CONFIG_FILE" "UUID")[m
+[31m-    NEZHA_SERVER=$(extract_json_value "$CONFIG_FILE" "NEZHA_SERVER")[m
+[31m-    NEZHA_PORT=$(extract_json_value "$CONFIG_FILE" "NEZHA_PORT" "5555")[m
+[31m-    NEZHA_KEY=$(extract_json_value "$CONFIG_FILE" "NEZHA_KEY")[m
+[31m-    [m
+[31m-    # 显示配置信息（隐藏敏感信息）[m
+[32m+[m
+[32m+[m[32m    CF_DOMAIN=$(extract_json_value "$CONFIG_FILE" "cf_domain")[m
+[32m+[m[32m    CF_TOKEN=$(extract_json_value "$CONFIG_FILE" "cf_token")[m
+[32m+[m[32m    UUID=$(extract_json_value "$CONFIG_FILE" "uuid")[m
+[32m+[m[32m    NEZHA_SERVER=$(extract_json_value "$CONFIG_FILE" "nezha_server")[m
+[32m+[m[32m    NEZHA_PORT=$(extract_json_value "$CONFIG_FILE" "nezha_port" "5555")[m
+[32m+[m[32m    NEZHA_KEY=$(extract_json_value "$CONFIG_FILE" "nezha_key")[m
+[32m+[m[32m    ARGO_PORT=$(extract_json_value "$CONFIG_FILE" "argo_port" "27039")[m
+[32m+[m
+[32m+[m[32m    NEZHA_PORT=${NEZHA_PORT:-5555}[m
+[32m+[m[32m    ARGO_PORT=${ARGO_PORT:-27039}[m
+[32m+[m
+[32m+[m[32m    export CF_DOMAIN CF_TOKEN UUID NEZHA_SERVER NEZHA_PORT NEZHA_KEY ARGO_PORT[m
+[32m+[m
+     log_info "Configuration loaded successfully:"[m
+     log_info "  CF_DOMAIN: ${CF_DOMAIN:-'not set'}"[m
+[31m-    if [[ -n "$CF_TOKEN" ]]; then[m
+[31m-        log_info "  CF_TOKEN: 'set'"[m
+[31m-    else[m
+[31m-        log_info "  CF_TOKEN: 'not set'"[m
+[32m+[m[32m    log_info "  CF_TOKEN: $(format_sensitive_value "$CF_TOKEN")"[m
+[32m+[m[32m    log_info "  UUID: ${UUID:-'not set'}"[m
+[32m+[m[32m    log_info "  NEZHA_SERVER: ${NEZHA_SERVER:-'not set'}"[m
+[32m+[m[32m    log_info "  NEZHA_PORT: ${NEZHA_PORT:-'not set'}"[m
+[32m+[m[32m    log_info "  NEZHA_KEY: $(format_sensitive_value "$NEZHA_KEY")"[m
+[32m+[m[32m    log_info "  ARGO_PORT: ${ARGO_PORT:-'not set'}"[m
+[32m+[m
+[32m+[m[32m    if [[ -z "$CF_DOMAIN" ]]; then[m
+[32m+[m[32m        log_warn "CF_DOMAIN is not set; Argo fixed domain will be unavailable."[m
+     fi[m
+[31m-    if [[ -n "$UUID" ]]; then[m
+[31m-        log_info "  UUID: 'set'"[m
+[31m-    else[m
+[31m-        log_info "  UUID: 'not set'"[m
+[32m+[m[32m    if [[ -z "$CF_TOKEN" ]]; then[m
+[32m+[m[32m        log_warn "CF_TOKEN is not set; falling back to temporary tunnels."[m
+     fi[m
+[31m-    log_info "  NEZHA_SERVER: ${NEZHA_SERVER:-'not set'}"[m
+[31m-    log_info "  NEZHA_PORT: $NEZHA_PORT"[m
+[31m-    if [[ -n "$NEZHA_KEY" ]]; then[m
+[31m-        log_info "  NEZHA_KEY: 'set'"[m
+[31m-    else[m
+[31m-        log_info "  NEZHA_KEY: 'not set'"[m
+[32m+[m[32m    if [[ -z "$UUID" ]]; then[m
+[32m+[m[32m        log_warn "UUID is not set; downstream services may require this value."[m
+     fi[m
+[31m-    [m
+[32m+[m
+     return 0[m
+ }[m
+ [m

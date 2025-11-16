@@ -31,6 +31,22 @@ log_debug() {
     fi
 }
 
+format_secret_value() {
+    local value="$1"
+
+    if [[ -z "$value" ]]; then
+        printf "%s" "(not set)"
+        return
+    fi
+
+    local length=${#value}
+    if (( length <= 10 )); then
+        printf "%s" "$value"
+    else
+        printf "%s... (loaded)" "${value:0:6}"
+    fi
+}
+
 # =============================================================================
 # Configuration
 # =============================================================================
@@ -73,36 +89,44 @@ print_footer() {
 
 load_config() {
     log_info "Loading configuration from $CONFIG_FILE..."
-    
+
     if [[ ! -f "$CONFIG_FILE" ]]; then
         log_warn "Config file not found: $CONFIG_FILE"
         log_info "Using default values"
         return 1
     fi
-    
+
     log_info "Config file found, parsing..."
-    
-    # Try using jq first
+
     if command -v jq >/dev/null 2>&1; then
         log_debug "Using jq for JSON parsing"
-        CF_DOMAIN=$(jq -r '.CF_DOMAIN // empty' "$CONFIG_FILE" 2>/dev/null)
-        CF_TOKEN=$(jq -r '.CF_TOKEN // empty' "$CONFIG_FILE" 2>/dev/null)
-        UUID=$(jq -r '.UUID // empty' "$CONFIG_FILE" 2>/dev/null)
-        ARGO_PORT=$(jq -r '.ARGO_PORT // "27039"' "$CONFIG_FILE" 2>/dev/null)
+        CF_DOMAIN=$(jq -r '.CF_DOMAIN // .cf_domain // empty' "$CONFIG_FILE" 2>/dev/null)
+        CF_TOKEN=$(jq -r '.CF_TOKEN // .cf_token // empty' "$CONFIG_FILE" 2>/dev/null)
+        UUID=$(jq -r '.UUID // .uuid // empty' "$CONFIG_FILE" 2>/dev/null)
+        ARGO_PORT=$(jq -r '.ARGO_PORT // .argo_port // "27039"' "$CONFIG_FILE" 2>/dev/null)
     else
-        log_debug "jq not available, using grep fallback"
-        CF_DOMAIN=$(grep -o '"CF_DOMAIN"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" 2>/dev/null | sed 's/.*"\([^"]*\)".*/\1/' || echo "")
-        CF_TOKEN=$(grep -o '"CF_TOKEN"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" 2>/dev/null | sed 's/.*"\([^"]*\)".*/\1/' || echo "")
-        UUID=$(grep -o '"UUID"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" 2>/dev/null | sed 's/.*"\([^"]*\)".*/\1/' || echo "")
-        ARGO_PORT=$(grep -o '"ARGO_PORT"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" 2>/dev/null | sed 's/.*"\([^"]*\)".*/\1/' || echo "27039")
+        log_debug "jq not available, using fallback parser"
+        CF_DOMAIN=$(grep -oE '"(CF_DOMAIN|cf_domain)"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" 2>/dev/null | head -1 | sed -E 's/.*"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/')
+        CF_TOKEN=$(grep -oE '"(CF_TOKEN|cf_token)"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" 2>/dev/null | head -1 | sed -E 's/.*"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/')
+        UUID=$(grep -oE '"(UUID|uuid)"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" 2>/dev/null | head -1 | sed -E 's/.*"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/')
+        ARGO_PORT=$(grep -oE '"(ARGO_PORT|argo_port)"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" 2>/dev/null | head -1 | sed -E 's/.*"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/')
+        if [[ -z "$ARGO_PORT" ]]; then
+            ARGO_PORT=$(grep -oE '"(ARGO_PORT|argo_port)"[[:space:]]*:[[:space:]]*[^,}[:space:]]+' "$CONFIG_FILE" 2>/dev/null | head -1 | sed -E 's/.*:[[:space:]]*//' | sed -E 's/[",]*$//')
+        fi
     fi
-    
+
+    ARGO_PORT=${ARGO_PORT:-27039}
+
+    if [[ -n "$ARGO_PORT" ]]; then
+        KEEPALIVE_PORT=$ARGO_PORT
+    fi
+
     log_info "Configuration loaded:"
     log_info "  CF_DOMAIN: ${CF_DOMAIN:-'(not set)'}"
-    log_info "  CF_TOKEN: ${CF_TOKEN:+'(set)'}${CF_TOKEN:-'(not set)'}"
-    log_info "  UUID: ${UUID:+'(set)'}${UUID:-'(not set)'}"
+    log_info "  CF_TOKEN: $(format_secret_value "$CF_TOKEN")"
+    log_info "  UUID: ${UUID:-'(not set)'}"
     log_info "  ARGO_PORT: $ARGO_PORT"
-    
+
     return 0
 }
 
