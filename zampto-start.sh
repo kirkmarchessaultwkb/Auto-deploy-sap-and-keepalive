@@ -123,7 +123,35 @@ log_error() {
 
 cleanup() {
     log_info "Received termination signal, cleaning up..."
-    pkill -P $$ || true
+    
+    # Kill Node.js server
+    if [ -n "$NODE_PID" ]; then
+        log_info "Stopping Node.js server (PID: $NODE_PID)..."
+        kill $NODE_PID 2>/dev/null || true
+    fi
+    
+    # Kill Cloudflared tunnel
+    if [ -n "$CLOUDFLARED_PID" ]; then
+        log_info "Stopping Cloudflared tunnel (PID: $CLOUDFLARED_PID)..."
+        kill $CLOUDFLARED_PID 2>/dev/null || true
+    fi
+    
+    # Kill Nezha agent
+    if [ -n "$NEZHA_PID" ]; then
+        log_info "Stopping Nezha agent (PID: $NEZHA_PID)..."
+        kill $NEZHA_PID 2>/dev/null || true
+    fi
+    
+    # Kill health check
+    if [ -n "$HEALTH_CHECK_PID" ]; then
+        log_info "Stopping health check (PID: $HEALTH_CHECK_PID)..."
+        kill $HEALTH_CHECK_PID 2>/dev/null || true
+    fi
+    
+    # Kill all child processes
+    pkill -P $ || true
+    
+    log_info "Cleanup completed"
     exit 0
 }
 
@@ -409,7 +437,66 @@ setup_cloudflared() {
 }
 
 # ============================================================================
-# 4.1. Start Cloudflared Tunnel
+# 4.1. Start Node.js HTTP Server
+# ============================================================================
+
+start_node_server() {
+    if [ ! -f "index.js" ]; then
+        log_error "index.js not found, cannot start Node.js server"
+        return 1
+    fi
+    
+    log_info "Starting Node.js HTTP server..."
+    mkdir -p logs
+    
+    # Set required environment variables
+    export SERVER_PORT=8001
+    export FILE_PATH="${FILE_PATH:-./.npm}"
+    export SUB_PATH="${SUB_PATH:-sub}"
+    
+    log_info "Node.js server configuration:"
+    log_info "  - SERVER_PORT: 8001"
+    log_info "  - FILE_PATH: $FILE_PATH"
+    log_info "  - SUB_PATH: $SUB_PATH"
+    
+    # Start Node.js server in background
+    node index.js > logs/node-server.log 2>&1 &
+    NODE_PID=$!
+    
+    log_info "Node.js server started with PID: $NODE_PID"
+    
+    # Wait for port 8001 to be ready
+    log_info "Waiting for port 8001 to be ready..."
+    if wait_for_port 8001 30; then
+        log_info "✅ Node.js HTTP server is ready on port 8001"
+        return 0
+    else
+        log_error "Node.js server failed to start on port 8001"
+        log_error "Last 20 lines of node-server.log:"
+        tail -20 logs/node-server.log 2>/dev/null || echo "  (log file not available)"
+        return 1
+    fi
+}
+
+wait_for_port() {
+    local port=$1
+    local timeout=$2
+    local elapsed=0
+    
+    while [ $elapsed -lt $timeout ]; do
+        if timeout 2 bash -c "echo > /dev/tcp/127.0.0.1/$port" 2>/dev/null; then
+            return 0
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    
+    log_error "Port $port did not become ready after ${timeout}s"
+    return 1
+}
+
+# ============================================================================
+# 4.2. Start Cloudflared Tunnel
 # ============================================================================
 
 start_cloudflared_tunnel() {
@@ -438,12 +525,12 @@ start_cloudflared_tunnel() {
             if [ -n "$tunnel_id" ] && [ -f "$credentials_file" ]; then
                 ./cloudflared tunnel --edge-ip-version auto --protocol http2 \
                     --credentials-file "$credentials_file" \
-                    --url http://127.0.0.1:$LISTEN_PORT run "$tunnel_id" > "$CLOUDFLARED_LOG" 2>&1 &
+                    --url http://127.0.0.1:8001 run "$tunnel_id" > "$CLOUDFLARED_LOG" 2>&1 &
             else
                 # Fallback: try with ARGO_DOMAIN if tunnel_id not available
                 ./cloudflared tunnel --edge-ip-version auto --protocol http2 \
                     --credentials-file "$credentials_file" \
-                    --url http://127.0.0.1:$LISTEN_PORT run > "$CLOUDFLARED_LOG" 2>&1 &
+                    --url http://127.0.0.1:8001 run > "$CLOUDFLARED_LOG" 2>&1 &
             fi
         else
             # Token format
@@ -472,7 +559,7 @@ start_cloudflared_tunnel() {
         
         # Temporary tunnel (Quick Tunnel)
         ./cloudflared tunnel --edge-ip-version auto --protocol http2 \
-            --url http://127.0.0.1:$LISTEN_PORT --no-autoupdate > "$CLOUDFLARED_LOG" 2>&1 &
+            --url http://127.0.0.1:8001 --no-autoupdate > "$CLOUDFLARED_LOG" 2>&1 &
         
         CLOUDFLARED_PID=$!
         log_info "Cloudflared started with PID: $CLOUDFLARED_PID (temporary tunnel)"
@@ -499,7 +586,7 @@ start_cloudflared_tunnel() {
 }
 
 # ============================================================================
-# 4.2. Generate Subscription File
+# 4.3. Generate Subscription File
 # ============================================================================
 
 generate_subscription() {
@@ -604,12 +691,22 @@ mkdir -p logs
 while true; do
     sleep $CHECK_INTERVAL
     
+    # Check Node.js server (port 8001)
+    if ! pgrep -f "node index.js" > /dev/null; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARNING: Node.js server process not found" >> "$LOG_FILE"
+    fi
+    
+    if ! timeout 2 bash -c "echo > /dev/tcp/127.0.0.1/8001" 2>/dev/null; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARNING: Port 8001 (Node.js) not responding" >> "$LOG_FILE"
+    fi
+    
+    # Check sing-box (port 8080)
     if ! pgrep -f "sing-box" > /dev/null; then
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARNING: sing-box process not found" >> "$LOG_FILE"
     fi
     
     if ! timeout 2 bash -c "echo > /dev/tcp/127.0.0.1/8080" 2>/dev/null; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARNING: Port 8080 not responding" >> "$LOG_FILE"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARNING: Port 8080 (sing-box) not responding" >> "$LOG_FILE"
     fi
 done
 HEALTH_EOF
@@ -724,29 +821,41 @@ main() {
     log_info "   CPU Target: 40-50% (from 70%)"
     log_info "=========================================="
     
+    # ===== Step 1: Download binaries =====
+    log_info "Step 1: Downloading binaries..."
     download_sing_box
     setup_cloudflared
     setup_nezha
     
+    # ===== Step 2: Generate configuration =====
+    log_info "Step 2: Generating configuration..."
     generate_config
     setup_health_check
     
-    log_info "UUID: ${UUID:-not configured}"
-    log_info "Listen Port: ${LISTEN_PORT:-8080}"
+    log_info "Configuration summary:"
+    log_info "  UUID: ${UUID:-not configured}"
+    log_info "  Listen Port: ${LISTEN_PORT:-8080}"
     
     if [ -n "$ARGO_DOMAIN" ]; then
-        log_info "Argo Domain: $ARGO_DOMAIN"
+        log_info "  Argo Domain: $ARGO_DOMAIN"
     fi
     
     if [ -n "$NEZHA_SERVER" ]; then
-        log_info "Nezha Server: $NEZHA_SERVER"
+        log_info "  Nezha Server: $NEZHA_SERVER"
     fi
     
     send_telegram_notification "sing-box service starting on zampto Node.js platform" "info"
     
-    # Start Nezha agent if configured
+    # ===== Step 3: Start Node.js HTTP server =====
+    log_info "Step 3: Starting Node.js HTTP server..."
+    if ! start_node_server; then
+        log_error "Failed to start Node.js server, aborting"
+        exit 1
+    fi
+    
+    # ===== Step 4: Start Nezha agent (optional) =====
     if [ -f "nezha-agent" ] && [ -n "$NEZHA_SERVER" ] && [ -n "$NEZHA_KEY" ]; then
-        log_info "Starting Nezha monitoring agent..."
+        log_info "Step 4: Starting Nezha monitoring agent..."
         
         # Determine Nezha version based on NEZHA_SERVER format
         if echo "$NEZHA_SERVER" | grep -q ":"; then
@@ -761,28 +870,41 @@ main() {
             NEZHA_PID=$!
             log_info "Nezha agent (v0) started with PID: $NEZHA_PID"
         fi
+    else
+        log_info "Step 4: Nezha monitoring not configured, skipping..."
     fi
     
-    # Start Cloudflared tunnel
-    log_info "Starting Cloudflared tunnel..."
-    start_cloudflared_tunnel
+    # ===== Step 5: Start Cloudflared tunnel =====
+    log_info "Step 5: Starting Cloudflared tunnel (proxy to 127.0.0.1:8001)..."
+    if ! start_cloudflared_tunnel; then
+        log_warn "Cloudflared tunnel failed to start, continuing without tunnel"
+    fi
     
     # Wait a moment for tunnel to stabilize
     sleep 3
     
-    # Generate subscription file
-    log_info "Generating subscription..."
+    # ===== Step 6: Generate subscription file =====
+    log_info "Step 6: Generating subscription file..."
     generate_subscription
     
-    log_info "Starting sing-box service with CPU optimizations..."
-    log_info "- Process Priority: nice -n 19, ionice -c 3"
-    log_info "- Logging Level: error only"
-    log_info "- Health Check: 30s interval"
-    
+    # ===== Step 7: Start health check =====
+    log_info "Step 7: Starting health check service..."
     ./health-check.sh &
     HEALTH_CHECK_PID=$!
+    log_info "Health check started with PID: $HEALTH_CHECK_PID"
     
-    log_info "Health check PID: $HEALTH_CHECK_PID"
+    # ===== Step 8: Start sing-box =====
+    log_info "Step 8: Starting sing-box service with CPU optimizations..."
+    log_info "  - Process Priority: nice -n 19, ionice -c 3"
+    log_info "  - Logging Level: error only"
+    log_info "  - Health Check: 30s interval"
+    log_info "  - sing-box listens on: 0.0.0.0:8080"
+    log_info "  - Node.js HTTP server: 127.0.0.1:8001"
+    log_info "  - Cloudflared proxies to: 127.0.0.1:8001"
+    
+    log_info "=========================================="
+    log_info "All services started successfully!"
+    log_info "=========================================="
     
     start_with_optimization ./sing-box run -c config/config.json
 }
