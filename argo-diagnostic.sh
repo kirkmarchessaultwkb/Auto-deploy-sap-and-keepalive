@@ -2,8 +2,17 @@
 
 # =============================================================================
 # Zampto Diagnostic-Friendly Argo Tunnel Script
-# Version: 2.0.0
+# Version: 2.1.0
 # Description: Enhanced logging and diagnostics for Argo tunnel in zampto env
+# 
+# Changelog:
+#   v2.1.0 (2025-01-XX) - Fixed cloudflared download with binary verification
+#     - Added verify_cloudflared_binary() function with ELF check
+#     - Added retry mechanism (3 attempts)
+#     - Downloads to temp file first, then verifies before moving
+#     - Shows debug info if non-binary file downloaded (HTML/text)
+#     - Tests binary with --version after download
+#   v2.0.0 - Initial diagnostic version with enhanced logging
 # =============================================================================
 
 set -o pipefail
@@ -269,60 +278,195 @@ EOF
 # Cloudflared Tunnel
 # =============================================================================
 
+verify_cloudflared_binary() {
+    local binary_path="$1"
+    
+    log_debug "Verifying cloudflared binary at: $binary_path"
+    
+    # Check if file exists
+    if [[ ! -f "$binary_path" ]]; then
+        log_error "Binary file does not exist: $binary_path"
+        return 1
+    fi
+    
+    # Check if file is an ELF binary
+    if command -v file >/dev/null 2>&1; then
+        local file_type
+        file_type=$(file "$binary_path" 2>/dev/null)
+        log_debug "File type: $file_type"
+        
+        if echo "$file_type" | grep -q "ELF"; then
+            log_success "Valid ELF binary detected"
+        else
+            log_error "Downloaded file is NOT a valid ELF binary"
+            log_error "File type: $file_type"
+            log_error "First 200 bytes of file (for debugging):"
+            head -c 200 "$binary_path" | od -c | head -10
+            log_error ""
+            log_error "This usually means:"
+            log_error "  1. GitHub returned an error page (HTML)"
+            log_error "  2. Network proxy/firewall blocked the download"
+            log_error "  3. Incorrect architecture or version"
+            return 1
+        fi
+    else
+        log_warn "Command 'file' not available, skipping binary verification"
+    fi
+    
+    # Check if file is executable
+    chmod +x "$binary_path" 2>/dev/null
+    if [[ ! -x "$binary_path" ]]; then
+        log_error "Cannot make binary executable"
+        return 1
+    fi
+    
+    # Try to run --version to verify it works
+    if "$binary_path" --version >/dev/null 2>&1; then
+        local version
+        version=$("$binary_path" --version 2>/dev/null | head -1)
+        log_success "Binary is executable and working"
+        log_info "Version: $version"
+        return 0
+    else
+        log_error "Binary exists but cannot execute --version"
+        return 1
+    fi
+}
+
+download_cloudflared_with_curl() {
+    local url="$1"
+    local output="$2"
+    local temp_file="${output}.tmp"
+    
+    log_info "Attempting download with curl..."
+    log_debug "URL: $url"
+    
+    # Download to temp file first
+    if curl -fsSL -o "$temp_file" "$url" 2>/tmp/curl.log; then
+        log_debug "Download completed, verifying..."
+        
+        # Verify before moving to final location
+        if verify_cloudflared_binary "$temp_file"; then
+            mv "$temp_file" "$output"
+            log_success "Download with curl successful"
+            return 0
+        else
+            log_error "Downloaded file verification failed"
+            rm -f "$temp_file"
+            return 1
+        fi
+    else
+        log_warn "curl download failed"
+        if [[ -f /tmp/curl.log ]]; then
+            cat /tmp/curl.log
+        fi
+        rm -f "$temp_file"
+        return 1
+    fi
+}
+
+download_cloudflared_with_wget() {
+    local url="$1"
+    local output="$2"
+    local temp_file="${output}.tmp"
+    
+    log_info "Attempting download with wget..."
+    log_debug "URL: $url"
+    
+    # Download to temp file first
+    if wget -O "$temp_file" "$url" 2>/tmp/wget.log; then
+        log_debug "Download completed, verifying..."
+        
+        # Verify before moving to final location
+        if verify_cloudflared_binary "$temp_file"; then
+            mv "$temp_file" "$output"
+            log_success "Download with wget successful"
+            return 0
+        else
+            log_error "Downloaded file verification failed"
+            rm -f "$temp_file"
+            return 1
+        fi
+    else
+        log_warn "wget download failed"
+        if [[ -f /tmp/wget.log ]]; then
+            cat /tmp/wget.log
+        fi
+        rm -f "$temp_file"
+        return 1
+    fi
+}
+
 download_cloudflared() {
     log_info "====== Downloading Cloudflared ======"
     
     CLOUDFLARED_BIN="$BIN_DIR/cloudflared"
     
+    # Check if binary already exists and is valid
     if [[ -f "$CLOUDFLARED_BIN" ]]; then
         log_info "Cloudflared binary already exists at $CLOUDFLARED_BIN"
-        VERSION=$("$CLOUDFLARED_BIN" --version 2>/dev/null | head -1)
-        log_info "Version: $VERSION"
-        return 0
+        if verify_cloudflared_binary "$CLOUDFLARED_BIN"; then
+            log_success "Existing binary is valid, skipping download"
+            return 0
+        else
+            log_warn "Existing binary is invalid, will re-download"
+            rm -f "$CLOUDFLARED_BIN"
+        fi
     fi
     
     log_info "Fetching latest cloudflared version..."
     LATEST_VERSION=$(curl -s https://api.github.com/repos/cloudflare/cloudflared/releases/latest | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)".*/\1/' | sed 's/^v//')
     
     if [[ -z "$LATEST_VERSION" ]]; then
-        log_warn "Could not determine latest version, using default"
-        LATEST_VERSION="2024.1.1"
+        log_warn "Could not determine latest version, using fallback"
+        LATEST_VERSION="2024.12.0"
     fi
     
-    log_info "Latest version: $LATEST_VERSION"
+    log_info "Target version: $LATEST_VERSION"
+    log_info "Architecture: $ARCH_CLOUDFLARED"
     
     DOWNLOAD_URL="https://github.com/cloudflare/cloudflared/releases/download/v${LATEST_VERSION}/cloudflared-linux-${ARCH_CLOUDFLARED}"
     log_info "Download URL: $DOWNLOAD_URL"
     
-    # Try wget first
-    if command -v wget >/dev/null 2>&1; then
-        log_info "Downloading with wget..."
-        if wget -O "$CLOUDFLARED_BIN" "$DOWNLOAD_URL" 2>/tmp/wget.log; then
-            log_success "Download completed with wget"
-            chmod +x "$CLOUDFLARED_BIN"
-            log_success "Cloudflared is executable"
-            return 0
-        else
-            log_warn "wget download failed"
-            cat /tmp/wget.log
-        fi
-    fi
+    # Try up to 3 times with different methods
+    local max_attempts=3
+    local attempt=1
     
-    # Fallback to curl
-    if command -v curl >/dev/null 2>&1; then
-        log_info "Downloading with curl..."
-        if curl -L -o "$CLOUDFLARED_BIN" "$DOWNLOAD_URL" 2>/tmp/curl.log; then
-            log_success "Download completed with curl"
-            chmod +x "$CLOUDFLARED_BIN"
-            log_success "Cloudflared is executable"
-            return 0
-        else
-            log_warn "curl download failed"
-            cat /tmp/curl.log
+    while (( attempt <= max_attempts )); do
+        log_info "Download attempt $attempt/$max_attempts"
+        
+        # Try curl first (with -fsSL for better error handling)
+        if command -v curl >/dev/null 2>&1; then
+            if download_cloudflared_with_curl "$DOWNLOAD_URL" "$CLOUDFLARED_BIN"; then
+                log_success "Cloudflared downloaded and verified successfully"
+                return 0
+            fi
         fi
-    fi
+        
+        # Try wget as fallback
+        if command -v wget >/dev/null 2>&1; then
+            if download_cloudflared_with_wget "$DOWNLOAD_URL" "$CLOUDFLARED_BIN"; then
+                log_success "Cloudflared downloaded and verified successfully"
+                return 0
+            fi
+        fi
+        
+        log_warn "Attempt $attempt failed"
+        
+        if (( attempt < max_attempts )); then
+            log_info "Waiting 3 seconds before retry..."
+            sleep 3
+        fi
+        
+        ((attempt++))
+    done
     
-    log_error "Failed to download cloudflared"
+    log_error "Failed to download cloudflared after $max_attempts attempts"
+    log_error "Please check:"
+    log_error "  1. Internet connectivity"
+    log_error "  2. GitHub accessibility (not blocked by firewall)"
+    log_error "  3. Architecture is correct: $ARCH_CLOUDFLARED"
+    log_error "  4. Version exists: $LATEST_VERSION"
     return 1
 }
 
