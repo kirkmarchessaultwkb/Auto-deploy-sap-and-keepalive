@@ -21,18 +21,18 @@ load_config() {
     log "Loading config.json..."
     
     if [[ ! -f "$CONFIG_FILE" ]]; then
-        log "ERROR: Config file not found: $CONFIG_FILE"
-        return 1
+        echo "[ERROR] config.json not found at /home/container/config.json"
+        exit 1
     fi
     
-    # Load ALL parameters from config.json
-    CF_DOMAIN=$(grep -o '"cf_domain":"[^"]*"' "$CONFIG_FILE" | cut -d'"' -f4)
-    CF_TOKEN=$(grep -o '"cf_token":"[^"]*"' "$CONFIG_FILE" | cut -d'"' -f4)
-    UUID=$(grep -o '"uuid":"[^"]*"' "$CONFIG_FILE" | cut -d'"' -f4)
-    PORT=$(grep -o '"port":"[^"]*"' "$CONFIG_FILE" | cut -d'"' -f4)
-    NEZHA_SERVER=$(grep -o '"nezha_server":"[^"]*"' "$CONFIG_FILE" | cut -d'"' -f4)
-    NEZHA_PORT=$(grep -o '"nezha_port":"[^"]*"' "$CONFIG_FILE" | cut -d'"' -f4)
-    NEZHA_KEY=$(grep -o '"nezha_key":"[^"]*"' "$CONFIG_FILE" | cut -d'"' -f4)
+    # Load ALL parameters from config.json (handle spaces)
+    CF_DOMAIN=$(grep -o '"cf_domain"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" | sed 's/.*"\([^"]*\)".*/\1/')
+    CF_TOKEN=$(grep -o '"cf_token"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" | sed 's/.*"\([^"]*\)".*/\1/')
+    UUID=$(grep -o '"uuid"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" | sed 's/.*"\([^"]*\)".*/\1/')
+    PORT=$(grep -o '"port"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" | sed 's/.*"\([^"]*\)".*/\1/')
+    NEZHA_SERVER=$(grep -o '"nezha_server"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" | sed 's/.*"\([^"]*\)".*/\1/')
+    NEZHA_PORT=$(grep -o '"nezha_port"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" | sed 's/.*"\([^"]*\)".*/\1/')
+    NEZHA_KEY=$(grep -o '"nezha_key"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" | sed 's/.*"\([^"]*\)".*/\1/')
     
     # Set defaults
     PORT=${PORT:-27039}
@@ -40,6 +40,12 @@ load_config() {
     
     # Export for wispbyte script
     export CF_DOMAIN CF_TOKEN UUID PORT NEZHA_SERVER NEZHA_PORT NEZHA_KEY
+    
+    # Validate critical fields
+    if [[ -z "$CF_DOMAIN" || -z "$UUID" || -z "$PORT" ]]; then
+        echo "[ERROR] Missing required config fields"
+        exit 1
+    fi
     
     log "Config loaded:"
     log "  - Domain: ${CF_DOMAIN:-'not set'}"
@@ -91,7 +97,7 @@ start_nezha_agent() {
     
     sleep 1
     if kill -0 "$NEZHA_PID" 2>/dev/null; then
-        log "Nezha agent started (PID: $NEZHA_PID)"
+        echo "[INFO] Nezha agent started"
     else
         log "WARNING: Nezha agent may have failed to start"
     fi
@@ -116,7 +122,7 @@ main() {
     start_nezha_agent
     
     # 3. Call wispbyte deploy script
-    log "Calling wispbyte-argo-singbox-deploy.sh..."
+    echo "[INFO] Calling wispbyte-argo-singbox-deploy.sh..."
     if [[ -f "/home/container/wispbyte-argo-singbox-deploy.sh" ]]; then
         bash /home/container/wispbyte-argo-singbox-deploy.sh
     else
