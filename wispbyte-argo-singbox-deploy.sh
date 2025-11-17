@@ -1,13 +1,13 @@
 #!/bin/bash
 # =============================================================================
 # Wispbyte Argo Sing-box Deploy (Simplified for Zampto)
-# Version: 1.0.0
+# Version: 1.1.0 - Read from environment variables
 # Architecture: sing-box (127.0.0.1:PORT) → cloudflared → CF tunnel (443)
 # =============================================================================
 
 set -o pipefail
 
-CONFIG_FILE="/home/container/config.json"
+# Working directories
 WORK_DIR="/tmp/wispbyte-singbox"
 BIN_DIR="$WORK_DIR/bin"
 SINGBOX_BIN="$BIN_DIR/sing-box"
@@ -16,23 +16,26 @@ SINGBOX_CONFIG="$WORK_DIR/config.json"
 SUBSCRIPTION_FILE="/home/container/.npm/sub.txt"
 LOG_FILE="$WORK_DIR/deploy.log"
 
-CF_DOMAIN=""
-CF_TOKEN=""
-UUID=""
-PORT="27039"
+# Read configuration from environment variables (exported by start.sh)
+# Set defaults if not provided
+CF_DOMAIN="${CF_DOMAIN:-}"
+CF_TOKEN="${CF_TOKEN:-}"
+UUID="${UUID:-}"
+PORT="${PORT:-27039}"
 
 log() { echo "[$(date +'%H:%M:%S')] $1" | tee -a "$LOG_FILE"; }
 
-load_config() {
-    log "[INFO] Loading config from $CONFIG_FILE"
-    [[ ! -f "$CONFIG_FILE" ]] && { log "[ERROR] Config not found"; return 1; }
+validate_config() {
+    log "[INFO] Validating configuration..."
+    log "[INFO] Domain: ${CF_DOMAIN:-'not set'}, UUID: ${UUID:-'not set'}, Port: $PORT"
     
-    CF_DOMAIN=$(grep -o '"cf_domain"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" | sed 's/.*"\([^"]*\)".*/\1/' || echo "")
-    CF_TOKEN=$(grep -o '"cf_token"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" | sed 's/.*"\([^"]*\)".*/\1/' || echo "")
-    UUID=$(grep -o '"uuid"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" | sed 's/.*"\([^"]*\)".*/\1/' || echo "")
-    PORT=$(grep -o '"port"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" | sed 's/.*"\([^"]*\)".*/\1/' || echo "27039")
+    if [[ -z "$UUID" ]]; then
+        log "[ERROR] UUID not set (required)"
+        return 1
+    fi
     
-    log "[INFO] Domain: ${CF_DOMAIN:-'none'}, UUID: ${UUID:-'none'}, Port: $PORT"
+    log "[OK] Configuration valid"
+    return 0
 }
 
 detect_arch() {
@@ -155,12 +158,12 @@ generate_subscription() {
 
 main() {
     log "========================================"
-    log "Wispbyte Argo Sing-box Deploy"
+    log "Wispbyte Argo Sing-box Deploy v1.1.0"
     log "========================================"
     
     mkdir -p "$WORK_DIR" "$BIN_DIR"
     
-    load_config || exit 1
+    validate_config || exit 1
     download_singbox || exit 1
     download_cloudflared || exit 1
     generate_singbox_config
