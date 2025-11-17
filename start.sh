@@ -12,6 +12,14 @@
 
 CONFIG_FILE="/home/container/config.json"
 
+CF_DOMAIN=""
+CF_TOKEN=""
+UUID=""
+NEZHA_SERVER=""
+NEZHA_PORT="5555"
+NEZHA_KEY=""
+ARGO_PORT="27039"
+
 # Log functions with timestamps
 log_info() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] [INFO] $1"
@@ -38,22 +46,111 @@ extract_json_value() {
     local file=$1
     local key=$2
     local default_value=${3:-""}
-    
+
     if [[ ! -f "$file" ]]; then
-        echo "$default_value"
+        printf '%s\n' "$default_value"
         return 1
     fi
-    
-    # 使用 grep + sed 提取 JSON 值
-    local value=$(grep "\"$key\"" "$file" | sed 's/.*"\([^"]*\)".*/\1/' | head -1)
-    
-    # 如果没有找到值，返回默认值
-    if [[ -z "$value" ]]; then
-        echo "$default_value"
-        return 1
-    else
-        echo "$value"
+
+    local candidates=("$key")
+    local uppercase_key="${key^^}"
+    local lowercase_key="${key,,}"
+
+    if [[ "$uppercase_key" != "$key" ]]; then
+        candidates+=("$uppercase_key")
+    fi
+    if [[ "$lowercase_key" != "$key" && "$lowercase_key" != "$uppercase_key" ]]; then
+        candidates+=("$lowercase_key")
+    fi
+
+    local python_output=""
+    local python_status=1
+
+    if command -v python3 >/dev/null 2>&1; then
+        python_output=$(python3 - "$file" "${candidates[@]}" <<'PYCODE'
+import json
+import sys
+
+filename = sys.argv[1]
+keys = sys.argv[2:]
+
+try:
+    with open(filename, 'r', encoding='utf-8') as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(2)
+
+for key in keys:
+    if key in data:
+        value = data[key]
+        if value is None:
+            value = ""
+        if isinstance(value, (dict, list)):
+            import json as json_module
+            print(json_module.dumps(value, ensure_ascii=False))
+        else:
+            print(value)
+        sys.exit(0)
+
+sys.exit(1)
+PYCODE
+        )
+        python_status=$?
+    fi
+
+    if [[ $python_status -eq 0 ]]; then
+        printf '%s\n' "$python_output"
         return 0
+    fi
+
+    local value=""
+    for candidate in "${candidates[@]}"; do
+        value=$(awk -v key="$candidate" '
+            match($0, "\"" key "\"[[:space:]]*:[[:space:]]*\"([^\"]*)\"", arr) {
+                print arr[1]
+                exit
+            }
+        ' "$file")
+        if [[ -n "$value" ]]; then
+            break
+        fi
+
+        value=$(awk -v key="$candidate" '
+            match($0, "\"" key "\"[[:space:]]*:[[:space:]]*([^,} 	
+]+)", arr) {
+                print arr[1]
+                exit
+            }
+        ' "$file")
+        if [[ -n "$value" ]]; then
+            value=${value//\"/}
+            break
+        fi
+    done
+
+    if [[ -z "$value" ]]; then
+        printf '%s\n' "$default_value"
+        return 1
+    fi
+
+    printf '%s\n' "$value"
+    return 0
+}
+
+format_sensitive_value() {
+    local value="$1"
+    local placeholder=${2:-"'not set'"}
+
+    if [[ -z "$value" ]]; then
+        printf "%s" "$placeholder"
+        return
+    fi
+
+    local length=${#value}
+    if (( length <= 10 )); then
+        printf "%s (loaded)" "$value"
+    else
+        printf "%s... (loaded)" "${value:0:6}"
     fi
 }
 
@@ -63,41 +160,44 @@ extract_json_value() {
 
 load_config() {
     log_info "Loading configuration from: $CONFIG_FILE"
-    
+
     if [[ ! -f "$CONFIG_FILE" ]]; then
         log_error "Configuration file not found: $CONFIG_FILE"
         return 1
     fi
-    
-    # 提取配置值（不依赖 jq）
-    CF_DOMAIN=$(extract_json_value "$CONFIG_FILE" "CF_DOMAIN")
-    CF_TOKEN=$(extract_json_value "$CONFIG_FILE" "CF_TOKEN")
-    UUID=$(extract_json_value "$CONFIG_FILE" "UUID")
-    NEZHA_SERVER=$(extract_json_value "$CONFIG_FILE" "NEZHA_SERVER")
-    NEZHA_PORT=$(extract_json_value "$CONFIG_FILE" "NEZHA_PORT" "5555")
-    NEZHA_KEY=$(extract_json_value "$CONFIG_FILE" "NEZHA_KEY")
-    
-    # 显示配置信息（隐藏敏感信息）
+
+    CF_DOMAIN=$(extract_json_value "$CONFIG_FILE" "cf_domain")
+    CF_TOKEN=$(extract_json_value "$CONFIG_FILE" "cf_token")
+    UUID=$(extract_json_value "$CONFIG_FILE" "uuid")
+    NEZHA_SERVER=$(extract_json_value "$CONFIG_FILE" "nezha_server")
+    NEZHA_PORT=$(extract_json_value "$CONFIG_FILE" "nezha_port" "5555")
+    NEZHA_KEY=$(extract_json_value "$CONFIG_FILE" "nezha_key")
+    ARGO_PORT=$(extract_json_value "$CONFIG_FILE" "argo_port" "27039")
+
+    NEZHA_PORT=${NEZHA_PORT:-5555}
+    ARGO_PORT=${ARGO_PORT:-27039}
+
+    export CF_DOMAIN CF_TOKEN UUID NEZHA_SERVER NEZHA_PORT NEZHA_KEY ARGO_PORT
+
     log_info "Configuration loaded successfully:"
     log_info "  CF_DOMAIN: ${CF_DOMAIN:-'not set'}"
-    if [[ -n "$CF_TOKEN" ]]; then
-        log_info "  CF_TOKEN: 'set'"
-    else
-        log_info "  CF_TOKEN: 'not set'"
-    fi
-    if [[ -n "$UUID" ]]; then
-        log_info "  UUID: 'set'"
-    else
-        log_info "  UUID: 'not set'"
-    fi
+    log_info "  CF_TOKEN: $(format_sensitive_value "$CF_TOKEN")"
+    log_info "  UUID: ${UUID:-'not set'}"
     log_info "  NEZHA_SERVER: ${NEZHA_SERVER:-'not set'}"
-    log_info "  NEZHA_PORT: $NEZHA_PORT"
-    if [[ -n "$NEZHA_KEY" ]]; then
-        log_info "  NEZHA_KEY: 'set'"
-    else
-        log_info "  NEZHA_KEY: 'not set'"
+    log_info "  NEZHA_PORT: ${NEZHA_PORT:-'not set'}"
+    log_info "  NEZHA_KEY: $(format_sensitive_value "$NEZHA_KEY")"
+    log_info "  ARGO_PORT: ${ARGO_PORT:-'not set'}"
+
+    if [[ -z "$CF_DOMAIN" ]]; then
+        log_warn "CF_DOMAIN is not set; Argo fixed domain will be unavailable."
     fi
-    
+    if [[ -z "$CF_TOKEN" ]]; then
+        log_warn "CF_TOKEN is not set; falling back to temporary tunnels."
+    fi
+    if [[ -z "$UUID" ]]; then
+        log_warn "UUID is not set; downstream services may require this value."
+    fi
+
     return 0
 }
 
