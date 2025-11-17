@@ -398,14 +398,9 @@ main() {
     log_info "Starting Argo tunnel via argo-diagnostic.sh..."
     
     if [[ -f "/home/container/argo-diagnostic.sh" ]]; then
-        bash /home/container/argo-diagnostic.sh
-        
-        if [ $? -eq 0 ]; then
+        if bash /home/container/argo-diagnostic.sh; then
             log_success "✅ Argo tunnel setup completed successfully"
-            
-            # 生成订阅
-            log_info ""
-            generate_subscription_output
+            log_info "Subscription generation handled by argo-diagnostic.sh"
         else
             log_error "❌ Argo tunnel setup failed"
         fi
