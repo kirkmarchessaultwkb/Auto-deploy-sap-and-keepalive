@@ -585,50 +585,60 @@ start_cloudflared_tunnel() {
 }
 
 start_fixed_tunnel() {
-    log_info "Creating fixed tunnel configuration..."
-    
-    cat > "$WORK_DIR/tunnel.yml" << EOF
-tunnel: $CF_DOMAIN
-credentials-file: $WORK_DIR/credentials.json
-
-ingress:
-  - hostname: $CF_DOMAIN
-    service: http://127.0.0.1:$KEEPALIVE_PORT
-  - service: http_status:404
-EOF
-    
-    log_debug "Tunnel config created"
-    
-    # Create credentials file (simplified)
-    cat > "$WORK_DIR/credentials.json" << EOF
-{
-  "AccountTag": "$(echo "$CF_TOKEN" | cut -d: -f1)",
-  "TunnelSecret": "$(echo "$CF_TOKEN" | cut -d: -f2-)",
-  "TunnelID": "$(echo "$CF_TOKEN" | cut -d: -f3)"
-}
-EOF
-    
-    log_debug "Credentials file created"
+    log_info "Starting fixed tunnel with CF_TOKEN authentication..."
+    log_info "Domain: $CF_DOMAIN"
+    log_info "Target: http://127.0.0.1:$KEEPALIVE_PORT"
     
     CLOUDFLARED_BIN="$BIN_DIR/cloudflared"
     
-    log_info "Starting cloudflared with tunnel config..."
-    "$CLOUDFLARED_BIN" tunnel --config "$WORK_DIR/tunnel.yml" run > "$LOG_CLOUDFLARED" 2>&1 &
+    # Method 1: Use TUNNEL_TOKEN environment variable (recommended)
+    log_info "Using TUNNEL_TOKEN environment variable for authentication"
+    export TUNNEL_TOKEN="$CF_TOKEN"
+    
+    log_info "Command: TUNNEL_TOKEN=[hidden] $CLOUDFLARED_BIN tunnel run $CF_DOMAIN"
+    "$CLOUDFLARED_BIN" tunnel run "$CF_DOMAIN" > "$LOG_CLOUDFLARED" 2>&1 &
     CLOUDFLARED_PID=$!
     
     sleep 3
     
     if kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
-        log_success "Cloudflared tunnel started (PID: $CLOUDFLARED_PID)"
+        log_success "Cloudflared tunnel started with CF_TOKEN (PID: $CLOUDFLARED_PID)"
         echo "$CLOUDFLARED_PID" > "$PID_FILE_CLOUDFLARED"
         echo "https://$CF_DOMAIN" > "$TUNNEL_URL_FILE"
         log_success "Tunnel URL: https://$CF_DOMAIN"
         return 0
     else
-        log_error "Cloudflared tunnel failed to start"
+        log_error "Cloudflared tunnel failed to start with CF_TOKEN"
         log_error "Last log lines:"
         tail -20 "$LOG_CLOUDFLARED"
-        return 1
+        
+        # Fallback: Try Method 2 with --token parameter
+        log_warn "Attempting fallback method with --token parameter..."
+        log_info "Command: $CLOUDFLARED_BIN tunnel --token [hidden] --url http://127.0.0.1:$KEEPALIVE_PORT"
+        "$CLOUDFLARED_BIN" tunnel --token "$CF_TOKEN" --url "http://127.0.0.1:$KEEPALIVE_PORT" > "$LOG_CLOUDFLARED" 2>&1 &
+        CLOUDFLARED_PID=$!
+        
+        sleep 3
+        
+        if kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
+            log_success "Cloudflared tunnel started with --token parameter (PID: $CLOUDFLARED_PID)"
+            echo "$CLOUDFLARED_PID" > "$PID_FILE_CLOUDFLARED"
+            
+            # Extract tunnel URL from logs (temporary tunnel URL)
+            TUNNEL_URL=$(grep -o 'https://[a-zA-Z0-9-]*\.trycloudflare\.com' "$LOG_CLOUDFLARED" | head -1)
+            if [[ -n "$TUNNEL_URL" ]]; then
+                log_success "Tunnel URL obtained: $TUNNEL_URL"
+                echo "$TUNNEL_URL" > "$TUNNEL_URL_FILE"
+            else
+                log_warn "Tunnel started but URL not yet available"
+            fi
+            return 0
+        else
+            log_error "Both CF_TOKEN methods failed"
+            log_error "Last log lines:"
+            tail -20 "$LOG_CLOUDFLARED"
+            return 1
+        fi
     fi
 }
 
