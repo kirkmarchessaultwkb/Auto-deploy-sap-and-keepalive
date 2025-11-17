@@ -798,26 +798,9 @@ main() {
     log_success "All setup complete! Services should be running."
     log_info "Press Ctrl+C to stop."
     
-    # Keep script running and monitor services
-    while true; do
-        sleep 60
-        log_debug "Performing health check..."
-        
-        # Check if services are still running
-        if [[ -f "$PID_FILE_KEEPALIVE" ]]; then
-            KEEPALIVE_PID=$(cat "$PID_FILE_KEEPALIVE")
-            if ! kill -0 "$KEEPALIVE_PID" 2>/dev/null; then
-                log_warn "Keepalive server stopped unexpectedly (PID: $KEEPALIVE_PID)"
-            fi
-        fi
-        
-        if [[ -f "$PID_FILE_CLOUDFLARED" ]]; then
-            CLOUDFLARED_PID=$(cat "$PID_FILE_CLOUDFLARED")
-            if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
-                log_warn "Cloudflared tunnel stopped unexpectedly (PID: $CLOUDFLARED_PID)"
-            fi
-        fi
-    done
+    # Return 0 to indicate successful setup
+    # This allows start.sh to detect success and trigger subscription generation
+    exit 0
 }
 
 # =============================================================================
