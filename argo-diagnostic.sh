@@ -65,9 +65,11 @@ WORK_DIR="/home/container/argo-tuic"
 BIN_DIR="$WORK_DIR/bin"
 LOG_DIR="$WORK_DIR/logs"
 KEEPALIVE_PORT="27039"
+PROXY_TARGET_PORT="8080"
 PID_FILE_KEEPALIVE="$WORK_DIR/keepalive.pid"
 PID_FILE_CLOUDFLARED="$WORK_DIR/cloudflared.pid"
 TUNNEL_URL_FILE="$WORK_DIR/tunnel.url"
+SUBSCRIPTION_FILE="/home/container/.npm/sub.txt"
 LOG_CLOUDFLARED="$LOG_DIR/cloudflared.log"
 
 # Global variables
@@ -75,6 +77,7 @@ CF_DOMAIN=""
 CF_TOKEN=""
 UUID=""
 ARGO_PORT="27039"
+TUNNEL_URL=""
 
 # =============================================================================
 # Print header
@@ -574,6 +577,8 @@ start_cloudflared_tunnel() {
         return 1
     fi
     
+    log_info "Proxy target: http://127.0.0.1:$PROXY_TARGET_PORT"
+    
     # Check if we have CF_DOMAIN and CF_TOKEN for fixed tunnel
     if [[ -n "$CF_DOMAIN" && -n "$CF_TOKEN" ]]; then
         log_info "Starting fixed domain tunnel: $CF_DOMAIN"
@@ -587,7 +592,7 @@ start_cloudflared_tunnel() {
 start_fixed_tunnel() {
     log_info "Starting fixed tunnel with CF_TOKEN authentication..."
     log_info "Domain: $CF_DOMAIN"
-    log_info "Target: http://127.0.0.1:$KEEPALIVE_PORT"
+    log_info "Target: http://127.0.0.1:$PROXY_TARGET_PORT"
     
     CLOUDFLARED_BIN="$BIN_DIR/cloudflared"
     
@@ -604,8 +609,9 @@ start_fixed_tunnel() {
     if kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
         log_success "Cloudflared tunnel started with CF_TOKEN (PID: $CLOUDFLARED_PID)"
         echo "$CLOUDFLARED_PID" > "$PID_FILE_CLOUDFLARED"
-        echo "https://$CF_DOMAIN" > "$TUNNEL_URL_FILE"
-        log_success "Tunnel URL: https://$CF_DOMAIN"
+        TUNNEL_URL="https://$CF_DOMAIN"
+        echo "$TUNNEL_URL" > "$TUNNEL_URL_FILE"
+        log_success "Tunnel URL: $TUNNEL_URL"
         return 0
     else
         log_error "Cloudflared tunnel failed to start with CF_TOKEN"
@@ -614,8 +620,8 @@ start_fixed_tunnel() {
         
         # Fallback: Try Method 2 with --token parameter
         log_warn "Attempting fallback method with --token parameter..."
-        log_info "Command: $CLOUDFLARED_BIN tunnel --token [hidden] --url http://127.0.0.1:$KEEPALIVE_PORT"
-        "$CLOUDFLARED_BIN" tunnel --token "$CF_TOKEN" --url "http://127.0.0.1:$KEEPALIVE_PORT" > "$LOG_CLOUDFLARED" 2>&1 &
+        log_info "Command: $CLOUDFLARED_BIN tunnel --token [hidden] --url http://127.0.0.1:$PROXY_TARGET_PORT"
+        "$CLOUDFLARED_BIN" tunnel --token "$CF_TOKEN" --url "http://127.0.0.1:$PROXY_TARGET_PORT" > "$LOG_CLOUDFLARED" 2>&1 &
         CLOUDFLARED_PID=$!
         
         sleep 3
@@ -627,6 +633,7 @@ start_fixed_tunnel() {
             # Extract tunnel URL from logs (temporary tunnel URL)
             TUNNEL_URL=$(grep -o 'https://[a-zA-Z0-9-]*\.trycloudflare\.com' "$LOG_CLOUDFLARED" | head -1)
             if [[ -n "$TUNNEL_URL" ]]; then
+                TUNNEL_URL=$(echo "$TUNNEL_URL" | tr -d '[:space:]')
                 log_success "Tunnel URL obtained: $TUNNEL_URL"
                 echo "$TUNNEL_URL" > "$TUNNEL_URL_FILE"
             else
@@ -647,9 +654,9 @@ start_temporary_tunnel() {
     
     CLOUDFLARED_BIN="$BIN_DIR/cloudflared"
     
-    log_info "Command: $CLOUDFLARED_BIN tunnel --url http://127.0.0.1:$KEEPALIVE_PORT"
+    log_info "Command: $CLOUDFLARED_BIN tunnel --url http://127.0.0.1:$PROXY_TARGET_PORT"
     
-    "$CLOUDFLARED_BIN" tunnel --url "http://127.0.0.1:$KEEPALIVE_PORT" > "$LOG_CLOUDFLARED" 2>&1 &
+    "$CLOUDFLARED_BIN" tunnel --url "http://127.0.0.1:$PROXY_TARGET_PORT" > "$LOG_CLOUDFLARED" 2>&1 &
     CLOUDFLARED_PID=$!
     
     log_info "Cloudflared PID: $CLOUDFLARED_PID"
@@ -664,6 +671,7 @@ start_temporary_tunnel() {
         TUNNEL_URL=$(grep -o 'https://[a-zA-Z0-9-]*\.trycloudflare\.com' "$LOG_CLOUDFLARED" | head -1)
         
         if [[ -n "$TUNNEL_URL" ]]; then
+            TUNNEL_URL=$(echo "$TUNNEL_URL" | tr -d '[:space:]')
             log_success "Tunnel URL obtained: $TUNNEL_URL"
             echo "$TUNNEL_URL" > "$TUNNEL_URL_FILE"
         else
@@ -677,6 +685,144 @@ start_temporary_tunnel() {
         log_error "Cloudflared failed to start"
         log_error "Last log lines:"
         tail -20 "$LOG_CLOUDFLARED"
+        return 1
+    fi
+}
+
+# =============================================================================
+# Subscription Generation
+# =============================================================================
+
+generate_vmess_node() {
+    local domain="$1"
+    local uuid="$2"
+    local name="${3:-zampto-argo}"
+
+    if [[ -z "$domain" ]] || [[ -z "$uuid" ]]; then
+        return 1
+    fi
+
+    if ! command -v base64 >/dev/null 2>&1; then
+        log_error "Required command 'base64' not found"
+        return 1
+    fi
+
+    local node_json
+    node_json=$(cat <<EOF
+{
+  "v": "2",
+  "ps": "$name",
+  "add": "$domain",
+  "port": "443",
+  "id": "$uuid",
+  "aid": "0",
+  "net": "ws",
+  "type": "none",
+  "host": "$domain",
+  "path": "/ws",
+  "tls": "tls"
+}
+EOF
+)
+
+    local node_b64
+    node_b64=$(printf '%s' "$node_json" | base64 -w 0 2>/dev/null)
+    if [[ -z "$node_b64" ]]; then
+        log_error "Failed to encode VMess node"
+        return 1
+    fi
+
+    printf "vmess://%s" "$node_b64"
+    return 0
+}
+
+generate_subscription() {
+    local node="$1"
+    local sub_file="$2"
+
+    if [[ -z "$node" ]] || [[ -z "$sub_file" ]]; then
+        return 1
+    fi
+
+    local sub_dir
+    sub_dir=$(dirname "$sub_file")
+
+    if [[ -z "$sub_dir" ]]; then
+        log_error "Cannot determine subscription directory for $sub_file"
+        return 1
+    fi
+
+    if ! mkdir -p "$sub_dir"; then
+        log_error "Failed to create subscription directory: $sub_dir"
+        return 1
+    fi
+
+    if ! command -v base64 >/dev/null 2>&1; then
+        log_error "Required command 'base64' not found"
+        return 1
+    fi
+
+    if printf '%s' "$node" | base64 -w 0 > "$sub_file"; then
+        return 0
+    else
+        log_error "Failed to write subscription file: $sub_file"
+        return 1
+    fi
+}
+
+generate_vmess_subscription() {
+    log_info "====== Generating VMess Subscription ======"
+
+    local domain="$CF_DOMAIN"
+    local domain_source="CF_DOMAIN"
+
+    if [[ -z "$domain" ]]; then
+        if [[ -z "$TUNNEL_URL" && -f "$TUNNEL_URL_FILE" ]]; then
+            TUNNEL_URL=$(cat "$TUNNEL_URL_FILE" 2>/dev/null)
+        fi
+
+        if [[ -n "$TUNNEL_URL" ]]; then
+            TUNNEL_URL=$(echo "$TUNNEL_URL" | tr -d '[:space:]')
+            domain="${TUNNEL_URL#*://}"
+            domain="${domain%%/*}"
+            domain_source="tunnel URL"
+        fi
+    fi
+
+    if [[ -z "$domain" ]]; then
+        log_warn "Domain not available, skipping subscription generation"
+        return 1
+    fi
+
+    domain=$(echo "$domain" | tr -d '[:space:]')
+
+    if [[ -z "$UUID" ]]; then
+        log_warn "UUID is not set, skipping subscription generation"
+        return 1
+    fi
+
+    log_info "Using domain ($domain_source): $domain"
+
+    local vmess_node
+    if ! vmess_node=$(generate_vmess_node "$domain" "$UUID" "zampto-argo"); then
+        log_error "Failed to generate VMess node"
+        return 1
+    fi
+
+    if [[ -z "$vmess_node" ]]; then
+        log_error "Generated VMess node is empty"
+        return 1
+    fi
+
+    log_success "VMESS Node: $vmess_node"
+
+    if generate_subscription "$vmess_node" "$SUBSCRIPTION_FILE"; then
+        log_success "Subscription generated"
+        log_success "Subscription URL: https://$domain/sub"
+        log_info "Subscription file: $SUBSCRIPTION_FILE"
+        return 0
+    else
+        log_error "Failed to generate subscription file"
         return 1
     fi
 }
@@ -745,7 +891,33 @@ print_final_summary() {
     
     if [[ -f "$TUNNEL_URL_FILE" ]]; then
         TUNNEL_URL=$(cat "$TUNNEL_URL_FILE")
+        TUNNEL_URL=$(echo "$TUNNEL_URL" | tr -d '[:space:]')
         log_info "  Tunnel URL: $TUNNEL_URL"
+    fi
+    
+    log_info ""
+    log_info "Subscription:"
+    if [[ -f "$SUBSCRIPTION_FILE" ]]; then
+        log_info "  File: $SUBSCRIPTION_FILE"
+        local summary_domain=""
+        if [[ -n "$CF_DOMAIN" ]]; then
+            summary_domain="$CF_DOMAIN"
+        elif [[ -n "$TUNNEL_URL" ]]; then
+            summary_domain="${TUNNEL_URL#*://}"
+            summary_domain="${summary_domain%%/*}"
+        elif [[ -f "$TUNNEL_URL_FILE" ]]; then
+            local tunnel_from_file
+            tunnel_from_file=$(cat "$TUNNEL_URL_FILE" 2>/dev/null)
+            tunnel_from_file=$(echo "$tunnel_from_file" | tr -d '[:space:]')
+            summary_domain="${tunnel_from_file#*://}"
+            summary_domain="${summary_domain%%/*}"
+        fi
+
+        if [[ -n "$summary_domain" ]]; then
+            log_info "  URL: https://$summary_domain/sub"
+        fi
+    else
+        log_warn "  Subscription file not found ($SUBSCRIPTION_FILE)"
     fi
     
     log_info ""
@@ -785,12 +957,16 @@ main() {
     log_info ""
     start_cloudflared_tunnel || exit 1
     
-    # Step 7: Check status
+    # Step 7: Generate VMess subscription
+    log_info ""
+    generate_vmess_subscription
+    
+    # Step 8: Check status
     log_info ""
     sleep 3
     check_service_status
     
-    # Step 8: Print summary
+    # Step 9: Print summary
     log_info ""
     print_final_summary
     
@@ -799,7 +975,6 @@ main() {
     log_info "Press Ctrl+C to stop."
     
     # Return 0 to indicate successful setup
-    # This allows start.sh to detect success and trigger subscription generation
     exit 0
 }
 
