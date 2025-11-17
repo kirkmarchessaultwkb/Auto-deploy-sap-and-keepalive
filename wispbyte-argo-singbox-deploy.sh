@@ -1,14 +1,14 @@
 #!/bin/bash
 # =============================================================================
 # Wispbyte Argo Sing-box Deploy (Simplified for Zampto)
-# Version: 1.0.0
+# Version: 1.1.0 - Robust Config Loading (Env Vars + Config.json Fallback)
 # Architecture: sing-box (127.0.0.1:PORT) → cloudflared → CF tunnel (443)
 # =============================================================================
 
 set -o pipefail
 
 CONFIG_FILE="/home/container/config.json"
-WORK_DIR="/tmp/wispbyte-singbox"
+WORK_DIR="/home/container/argo-tuic"
 BIN_DIR="$WORK_DIR/bin"
 SINGBOX_BIN="$BIN_DIR/sing-box"
 CLOUDFLARED_BIN="$BIN_DIR/cloudflared"
@@ -16,23 +16,36 @@ SINGBOX_CONFIG="$WORK_DIR/config.json"
 SUBSCRIPTION_FILE="/home/container/.npm/sub.txt"
 LOG_FILE="$WORK_DIR/deploy.log"
 
-CF_DOMAIN=""
-CF_TOKEN=""
-UUID=""
-PORT="27039"
-
 log() { echo "[$(date +'%H:%M:%S')] $1" | tee -a "$LOG_FILE"; }
 
 load_config() {
-    log "[INFO] Loading config from $CONFIG_FILE"
-    [[ ! -f "$CONFIG_FILE" ]] && { log "[ERROR] Config not found"; return 1; }
+    log "[INFO] Loading configuration..."
     
-    CF_DOMAIN=$(grep -o '"cf_domain"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" | sed 's/.*"\([^"]*\)".*/\1/' || echo "")
-    CF_TOKEN=$(grep -o '"cf_token"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" | sed 's/.*"\([^"]*\)".*/\1/' || echo "")
-    UUID=$(grep -o '"uuid"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" | sed 's/.*"\([^"]*\)".*/\1/' || echo "")
-    PORT=$(grep -o '"port"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" | sed 's/.*"\([^"]*\)".*/\1/' || echo "27039")
+    # Priority 1: Environment variables (exported by start.sh)
+    CF_DOMAIN="${CF_DOMAIN:-}"
+    CF_TOKEN="${CF_TOKEN:-}"
+    UUID="${UUID:-}"
+    PORT="${PORT:-27039}"
     
-    log "[INFO] Domain: ${CF_DOMAIN:-'none'}, UUID: ${UUID:-'none'}, Port: $PORT"
+    # Priority 2: Fallback to config.json if env vars are empty
+    if [[ -z "$CF_DOMAIN" && -f "$CONFIG_FILE" ]]; then
+        CF_DOMAIN=$(grep -o '"cf_domain"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" | sed 's/.*"\([^"]*\)".*/\1/' || echo "")
+    fi
+    
+    if [[ -z "$CF_TOKEN" && -f "$CONFIG_FILE" ]]; then
+        CF_TOKEN=$(grep -o '"cf_token"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" | sed 's/.*"\([^"]*\)".*/\1/' || echo "")
+    fi
+    
+    if [[ -z "$UUID" && -f "$CONFIG_FILE" ]]; then
+        UUID=$(grep -o '"uuid"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" | sed 's/.*"\([^"]*\)".*/\1/' || echo "")
+    fi
+    
+    if [[ "$PORT" == "27039" && -f "$CONFIG_FILE" ]]; then
+        local cfg_port=$(grep -o '"port"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" | sed 's/.*"\([^"]*\)".*/\1/' || echo "")
+        [[ -n "$cfg_port" ]] && PORT="$cfg_port"
+    fi
+    
+    log "[INFO] Configuration: Domain=${CF_DOMAIN:-'not set'}, UUID=${UUID:-'not set'}, Port=$PORT"
 }
 
 detect_arch() {
