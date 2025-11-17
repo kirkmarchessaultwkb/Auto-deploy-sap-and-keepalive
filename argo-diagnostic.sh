@@ -397,6 +397,88 @@ download_cloudflared_with_wget() {
     fi
 }
 
+# 获取真实可用的最新 cloudflared 版本
+get_latest_available_cloudflared_version() {
+    local arch="${1:-$ARCH_CLOUDFLARED}"
+    
+    # 获取版本列表（最多检查最近20个版本）
+    local version_list
+    version_list=$(curl -s "https://api.github.com/repos/cloudflare/cloudflared/releases?per_page=20" 2>/dev/null)
+    
+    if [[ -z "$version_list" ]]; then
+        log_error "Failed to fetch releases from GitHub API"
+        echo ""
+        return 1
+    fi
+    
+    # 提取所有版本号（按发布时间排序，最新的在前）
+    local versions
+    versions=$(echo "$version_list" | grep -o '"tag_name": "[^"]*"' | sed 's/.*"\([^"]*\)".*/\1/' | sed 's/^v//')
+    
+    if [[ -z "$versions" ]]; then
+        log_error "No versions found in GitHub releases"
+        echo ""
+        return 1
+    fi
+    
+    log_debug "Found versions: $(echo "$versions" | head -5 | tr '\n' ' ')"
+    
+    # 逐个验证版本是否真实可用（二进制文件存在）
+    local version_count=0
+    local max_versions_to_check=10
+    
+    while IFS= read -r version && (( version_count < max_versions_to_check )); do
+        ((version_count++))
+        
+        if [[ -z "$version" ]]; then
+            continue
+        fi
+        
+        log_debug "Checking version v$version ($version_count/$max_versions_to_check)..."
+        
+        # 验证该版本的二进制文件是否存在
+        local test_url="https://github.com/cloudflare/cloudflared/releases/download/${version}/cloudflared-linux-${arch}"
+        
+        # 使用 HEAD 请求检查文件是否存在（跟随重定向，检查最终状态码）
+        local http_status
+        http_status=$(curl -s -L -I "$test_url" 2>/dev/null | grep -E "HTTP/[0-9]" | tail -1 | grep -o "[0-9][0-9][0-9]" | head -1)
+        
+        # 检查最终状态码是否为 2xx（表示成功）
+        if [[ "$http_status" =~ ^2 ]]; then
+            log_success "Found available version: v$version"
+            echo "$version"
+            return 0
+        else
+            log_debug "Version v$version is not available for $arch (HTTP: $http_status)"
+        fi
+        
+    done <<< "$versions"
+    
+    # 如果所有版本都不可用，使用已知的稳定版本作为备选
+    local fallback_versions=("2024.12.0" "2024.10.0" "2024.9.0" "2024.8.0")
+    
+    log_warn "No recent versions available, trying fallback versions..."
+    
+    for version in "${fallback_versions[@]}"; do
+        log_info "Trying fallback version: v$version"
+        
+        local test_url="https://github.com/cloudflare/cloudflared/releases/download/${version}/cloudflared-linux-${arch}"
+        
+        local http_status
+        http_status=$(curl -s -L -I "$test_url" 2>/dev/null | grep -E "HTTP/[0-9]" | tail -1 | grep -o "[0-9][0-9][0-9]" | head -1)
+        
+        if [[ "$http_status" =~ ^2 ]]; then
+            log_success "Fallback version available: v$version"
+            echo "$version"
+            return 0
+        fi
+    done
+    
+    log_error "No available cloudflared version found for architecture: $arch"
+    echo ""
+    return 1
+}
+
 download_cloudflared() {
     log_info "====== Downloading Cloudflared ======"
     
@@ -414,18 +496,18 @@ download_cloudflared() {
         fi
     fi
     
-    log_info "Fetching latest cloudflared version..."
-    LATEST_VERSION=$(curl -s https://api.github.com/repos/cloudflare/cloudflared/releases/latest | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)".*/\1/' | sed 's/^v//')
+    log_info "Finding latest available cloudflared version..."
+    LATEST_VERSION=$(get_latest_available_cloudflared_version)
     
     if [[ -z "$LATEST_VERSION" ]]; then
-        log_warn "Could not determine latest version, using fallback"
-        LATEST_VERSION="2024.12.0"
+        log_error "Failed to get available cloudflared version"
+        return 1
     fi
     
     log_info "Target version: $LATEST_VERSION"
     log_info "Architecture: $ARCH_CLOUDFLARED"
     
-    DOWNLOAD_URL="https://github.com/cloudflare/cloudflared/releases/download/v${LATEST_VERSION}/cloudflared-linux-${ARCH_CLOUDFLARED}"
+    DOWNLOAD_URL="https://github.com/cloudflare/cloudflared/releases/download/${LATEST_VERSION}/cloudflared-linux-${ARCH_CLOUDFLARED}"
     log_info "Download URL: $DOWNLOAD_URL"
     
     # Try up to 3 times with different methods
