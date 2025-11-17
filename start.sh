@@ -201,92 +201,6 @@ load_config() {
     return 0
 }
 
-# =============================================================================
-# Subscription Generation Functions
-# =============================================================================
-
-generate_vmess_node() {
-    local domain="$1"
-    local uuid="$2"
-    local name="${3:-zampto-node}"
-    
-    if [[ -z "$domain" ]] || [[ -z "$uuid" ]]; then
-        return 1
-    fi
-    
-    local node_json=$(cat <<EOF
-{
-  "v": "2",
-  "ps": "$name",
-  "add": "$domain",
-  "port": "443",
-  "id": "$uuid",
-  "aid": "0",
-  "net": "ws",
-  "type": "none",
-  "host": "$domain",
-  "path": "/ws",
-  "tls": "tls"
-}
-EOF
-)
-    
-    # Base64 encode without line wrapping
-    local node_b64=$(echo -n "$node_json" | base64 -w 0)
-    echo "vmess://$node_b64"
-}
-
-generate_subscription() {
-    local node="$1"
-    local sub_file="$2"
-    
-    if [[ -z "$node" ]] || [[ -z "$sub_file" ]]; then
-        return 1
-    fi
-    
-    # Create directory if it doesn't exist
-    mkdir -p "$(dirname "$sub_file")"
-    
-    # Subscription file content is base64 encoded node list
-    echo -n "$node" | base64 -w 0 > "$sub_file"
-    
-    return 0
-}
-
-generate_subscription_output() {
-    log_info "Generating vmess-ws-argo subscription..."
-    
-    if [[ -z "$CF_DOMAIN" ]]; then
-        log_warn "CF_DOMAIN is not set, skipping subscription generation"
-        return 1
-    fi
-    
-    if [[ -z "$UUID" ]]; then
-        log_warn "UUID is not set, skipping subscription generation"
-        return 1
-    fi
-    
-    # Generate vmess node
-    VMESS_NODE=$(generate_vmess_node "$CF_DOMAIN" "$UUID" "zampto-argo")
-    if [[ -z "$VMESS_NODE" ]]; then
-        log_error "Failed to generate vmess node"
-        return 1
-    fi
-    
-    log_success "VMESS Node: $VMESS_NODE"
-    
-    # Generate subscription file (for index.js /sub endpoint)
-    SUB_FILE="/home/container/.npm/sub.txt"
-    if generate_subscription "$VMESS_NODE" "$SUB_FILE"; then
-        log_success "Subscription generated"
-        log_success "Subscription URL: https://$CF_DOMAIN/sub"
-        log_info "Subscription file: $SUB_FILE"
-        return 0
-    else
-        log_error "Failed to generate subscription file"
-        return 1
-    fi
-}
 
 # =============================================================================
 # Nezha Agent Management
@@ -398,14 +312,9 @@ main() {
     log_info "Starting Argo tunnel via argo-diagnostic.sh..."
     
     if [[ -f "/home/container/argo-diagnostic.sh" ]]; then
-        if bash /home/container/argo-diagnostic.sh; then
-            log_success "✅ Argo tunnel setup completed successfully"
-            log_info "Subscription generation handled by argo-diagnostic.sh"
-        else
-            log_error "❌ Argo tunnel setup failed"
-        fi
+        bash /home/container/argo-diagnostic.sh
     else
-        log_error "argo-diagnostic.sh not found at /home/container/argo-diagnostic.sh"
+        log_error "argo-diagnostic.sh not found"
     fi
     
     log_info "=== Startup Script Completed ==="
