@@ -73,5 +73,6 @@ cloudflared
 nezha-agent
 health-check.sh
 config/
+config.json
 subscriptions/
 cache/
