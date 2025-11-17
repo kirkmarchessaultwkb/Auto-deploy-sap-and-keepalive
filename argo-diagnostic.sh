@@ -445,7 +445,6 @@ get_latest_available_cloudflared_version() {
         
         # 检查最终状态码是否为 2xx（表示成功）
         if [[ "$http_status" =~ ^2 ]]; then
-            log_success "Found available version: v$version"
             echo "$version"
             return 0
         else
@@ -468,7 +467,6 @@ get_latest_available_cloudflared_version() {
         http_status=$(curl -s -L -I "$test_url" 2>/dev/null | grep -E "HTTP/[0-9]" | tail -1 | grep -o "[0-9][0-9][0-9]" | head -1)
         
         if [[ "$http_status" =~ ^2 ]]; then
-            log_success "Fallback version available: v$version"
             echo "$version"
             return 0
         fi
@@ -504,8 +502,22 @@ download_cloudflared() {
         return 1
     fi
     
+    # Clean and validate version format
+    LATEST_VERSION=$(echo "$LATEST_VERSION" | tr -d '[:space:]')
+    
+    # Verify version format (should be like 2025.11.1)
+    if [[ ! "$LATEST_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        log_error "Invalid version format: '$LATEST_VERSION'"
+        log_error "Expected format: X.Y.Z (e.g., 2025.11.1)"
+        return 1
+    fi
+    
+    log_success "Found available version: v$LATEST_VERSION"
     log_info "Target version: $LATEST_VERSION"
     log_info "Architecture: $ARCH_CLOUDFLARED"
+    
+    # Debug output to verify clean version
+    log_debug "Version: '$LATEST_VERSION' (length: ${#LATEST_VERSION})"
     
     DOWNLOAD_URL="https://github.com/cloudflare/cloudflared/releases/download/${LATEST_VERSION}/cloudflared-linux-${ARCH_CLOUDFLARED}"
     log_info "Download URL: $DOWNLOAD_URL"
