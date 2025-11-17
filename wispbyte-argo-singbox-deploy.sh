@@ -1,11 +1,11 @@
 #!/bin/bash
 # =============================================================================
 # Wispbyte Argo Sing-box Deploy (Simplified for Zampto)
-# Version: 1.1.0 - Robust Config Loading (Env Vars + Config.json Fallback)
+# Version: 1.2.0 - Corrected Downloads & Proper URL Construction
 # Architecture: sing-box (127.0.0.1:PORT) → cloudflared → CF tunnel (443)
 # =============================================================================
 
-set -o pipefail
+set -euo pipefail
 
 CONFIG_FILE="/home/container/config.json"
 WORK_DIR="/home/container/argo-tuic"
@@ -14,162 +14,202 @@ SINGBOX_BIN="$BIN_DIR/sing-box"
 CLOUDFLARED_BIN="$BIN_DIR/cloudflared"
 SINGBOX_CONFIG="$WORK_DIR/config.json"
 SUBSCRIPTION_FILE="/home/container/.npm/sub.txt"
-LOG_FILE="$WORK_DIR/deploy.log"
 
-log() { echo "[$(date +'%H:%M:%S')] $1" | tee -a "$LOG_FILE"; }
+log_info() { echo "[$(date +'%H:%M:%S')] [INFO] $1" | tee -a "$WORK_DIR/deploy.log"; }
+log_error() { echo "[$(date +'%H:%M:%S')] [ERROR] $1" >&2 | tee -a "$WORK_DIR/deploy.log"; }
 
+# Load configuration (Priority 1: env vars, Priority 2: config.json)
 load_config() {
-    log "[INFO] Loading configuration..."
-    
-    # Priority 1: Environment variables (exported by start.sh)
     CF_DOMAIN="${CF_DOMAIN:-}"
     CF_TOKEN="${CF_TOKEN:-}"
     UUID="${UUID:-}"
     PORT="${PORT:-27039}"
     
-    # Priority 2: Fallback to config.json if env vars are empty
     if [[ -z "$CF_DOMAIN" && -f "$CONFIG_FILE" ]]; then
-        CF_DOMAIN=$(grep -o '"cf_domain"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" | sed 's/.*"\([^"]*\)".*/\1/' || echo "")
+        CF_DOMAIN=$(grep -o '"cf_domain":"[^"]*"' "$CONFIG_FILE" | cut -d'"' -f4 || true)
     fi
-    
     if [[ -z "$CF_TOKEN" && -f "$CONFIG_FILE" ]]; then
-        CF_TOKEN=$(grep -o '"cf_token"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" | sed 's/.*"\([^"]*\)".*/\1/' || echo "")
+        CF_TOKEN=$(grep -o '"cf_token":"[^"]*"' "$CONFIG_FILE" | cut -d'"' -f4 || true)
     fi
-    
     if [[ -z "$UUID" && -f "$CONFIG_FILE" ]]; then
-        UUID=$(grep -o '"uuid"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" | sed 's/.*"\([^"]*\)".*/\1/' || echo "")
+        UUID=$(grep -o '"uuid":"[^"]*"' "$CONFIG_FILE" | cut -d'"' -f4 || true)
     fi
-    
     if [[ "$PORT" == "27039" && -f "$CONFIG_FILE" ]]; then
-        local cfg_port=$(grep -o '"port"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" | sed 's/.*"\([^"]*\)".*/\1/' || echo "")
+        local cfg_port=$(grep -o '"port":"[^"]*"' "$CONFIG_FILE" | cut -d'"' -f4 || true)
         [[ -n "$cfg_port" ]] && PORT="$cfg_port"
     fi
     
-    log "[INFO] Configuration: Domain=${CF_DOMAIN:-'not set'}, UUID=${UUID:-'not set'}, Port=$PORT"
+    [[ -z "$CF_DOMAIN" || -z "$UUID" ]] && {
+        log_error "Missing config: CF_DOMAIN or UUID"
+        return 1
+    }
+    
+    log_info "Configuration: Domain=$CF_DOMAIN, UUID=$UUID, Port=$PORT"
 }
 
+# Detect architecture
 detect_arch() {
     case "$(uname -m)" in
         x86_64|amd64) echo "amd64" ;;
         aarch64|arm64) echo "arm64" ;;
         armv7l|armhf) echo "arm" ;;
-        *) log "[ERROR] Unsupported arch: $(uname -m)"; exit 1 ;;
+        *) log_error "Unsupported arch: $(uname -m)"; return 1 ;;
     esac
 }
 
+# Download sing-box with version detection
 download_singbox() {
-    log "[INFO] Downloading sing-box..."
-    local arch=$(detect_arch)
-    local url="https://github.com/SagerNet/sing-box/releases/latest/download/sing-box-linux-${arch}.tar.gz"
-    
+    log_info "Downloading sing-box..."
+    local arch=$(detect_arch) || return 1
     mkdir -p "$BIN_DIR"
-    curl -fsSL "$url" | tar -xz -C "$BIN_DIR" --strip-components=1 2>/dev/null
+    
+    local version=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep '"tag_name"' | head -1 | sed 's/.*"v//;s/".*//' || echo "1.9.0")
+    version=${version:-1.9.0}
+    
+    local url="https://github.com/SagerNet/sing-box/releases/download/v${version}/sing-box-${version}-linux-${arch}.tar.gz"
+    log_info "Sing-box URL: $url"
+    
+    curl -fsSL -o /tmp/sing-box.tar.gz "$url" || return 1
+    tar -xzf /tmp/sing-box.tar.gz -C "$BIN_DIR" --strip-components=1 2>/dev/null || true
+    rm -f /tmp/sing-box.tar.gz
     
     [[ ! -f "$SINGBOX_BIN" ]] && {
-        local found=$(find "$BIN_DIR" -name "*sing-box*" -type f | head -1)
+        local found=$(find "$BIN_DIR" -name "sing-box" -type f 2>/dev/null | head -1)
         [[ -n "$found" ]] && mv "$found" "$SINGBOX_BIN"
     }
     
-    chmod +x "$SINGBOX_BIN"
-    "$SINGBOX_BIN" version >/dev/null 2>&1 && { log "[OK] Sing-box ready"; return 0; }
-    log "[ERROR] Sing-box download failed"
+    chmod +x "$SINGBOX_BIN" || true
+    "$SINGBOX_BIN" version >/dev/null 2>&1 && {
+        log_info "[OK] Sing-box ready"
+        return 0
+    }
+    log_error "Sing-box download failed"
     return 1
 }
 
+# Download cloudflared with version detection
 download_cloudflared() {
-    log "[INFO] Downloading cloudflared..."
-    local arch=$(detect_arch)
-    local url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}"
-    
+    log_info "Downloading cloudflared..."
+    local arch=$(detect_arch) || return 1
     mkdir -p "$BIN_DIR"
-    curl -fsSL -o "$CLOUDFLARED_BIN" "$url" && chmod +x "$CLOUDFLARED_BIN"
-    "$CLOUDFLARED_BIN" --version >/dev/null 2>&1 && { log "[OK] Cloudflared ready"; return 0; }
-    log "[ERROR] Cloudflared download failed"
+    
+    local version=$(curl -s https://api.github.com/repos/cloudflare/cloudflared/releases/latest | grep '"tag_name"' | head -1 | sed 's/.*"//;s/".*//' || echo "latest")
+    version=${version:-latest}
+    
+    local url="https://github.com/cloudflare/cloudflared/releases/download/${version}/cloudflared-linux-${arch}"
+    log_info "Cloudflared URL: $url"
+    
+    curl -fsSL -o "$CLOUDFLARED_BIN" "$url" || {
+        log_error "Cloudflared download failed"
+        return 1
+    }
+    
+    chmod +x "$CLOUDFLARED_BIN" || true
+    "$CLOUDFLARED_BIN" --version >/dev/null 2>&1 && {
+        log_info "[OK] Cloudflared ready"
+        return 0
+    }
+    log_error "Cloudflared validation failed"
     return 1
 }
 
+# Generate sing-box configuration
 generate_singbox_config() {
-    log "[INFO] Generating sing-box config..."
+    log_info "Generating sing-box config..."
     cat > "$SINGBOX_CONFIG" <<EOF
 {
   "log": {"level": "info"},
   "inbounds": [{
     "type": "vmess",
-    "tag": "vmess-in",
     "listen": "127.0.0.1",
     "listen_port": $PORT,
     "users": [{"uuid": "$UUID", "alterId": 0}],
     "transport": {"type": "ws", "path": "/ws"}
   }],
-  "outbounds": [{"type": "direct", "tag": "direct"}]
+  "outbounds": [{"type": "direct"}]
 }
 EOF
-    log "[OK] Config generated"
+    log_info "[OK] Config generated"
 }
 
+# Start sing-box service
 start_singbox() {
-    log "[INFO] Starting sing-box on 127.0.0.1:$PORT..."
-    [[ ! -f "$SINGBOX_BIN" ]] && { log "[ERROR] Binary not found"; return 1; }
+    log_info "Starting sing-box on 127.0.0.1:$PORT..."
+    [[ ! -f "$SINGBOX_BIN" ]] && {
+        log_error "Binary not found: $SINGBOX_BIN"
+        return 1
+    }
     
     nohup "$SINGBOX_BIN" run -c "$SINGBOX_CONFIG" > "$WORK_DIR/singbox.log" 2>&1 &
     local pid=$!
     echo "$pid" > "$WORK_DIR/singbox.pid"
-    
     sleep 2
-    kill -0 "$pid" 2>/dev/null && { log "[OK] Sing-box started (PID: $pid)"; return 0; }
-    log "[ERROR] Sing-box failed to start"
+    
+    kill -0 "$pid" 2>/dev/null && {
+        log_info "[OK] Sing-box started (PID: $pid)"
+        return 0
+    }
+    log_error "Sing-box failed to start"
     return 1
 }
 
+# Start cloudflared tunnel
 start_cloudflared() {
-    log "[INFO] Starting cloudflared tunnel..."
-    [[ ! -f "$CLOUDFLARED_BIN" ]] && { log "[ERROR] Binary not found"; return 1; }
+    log_info "Starting cloudflared tunnel..."
+    [[ ! -f "$CLOUDFLARED_BIN" ]] && {
+        log_error "Binary not found: $CLOUDFLARED_BIN"
+        return 1
+    }
     
     if [[ -n "$CF_DOMAIN" && -n "$CF_TOKEN" ]]; then
-        log "[INFO] Fixed domain: $CF_DOMAIN"
+        log_info "Fixed domain: $CF_DOMAIN"
         nohup "$CLOUDFLARED_BIN" tunnel --no-autoupdate run --token "$CF_TOKEN" > "$WORK_DIR/cloudflared.log" 2>&1 &
     else
-        log "[INFO] Temporary tunnel (trycloudflare)"
+        log_info "Temporary tunnel (trycloudflare)"
         nohup "$CLOUDFLARED_BIN" tunnel --url "http://127.0.0.1:$PORT" > "$WORK_DIR/cloudflared.log" 2>&1 &
     fi
     
     local pid=$!
     echo "$pid" > "$WORK_DIR/cloudflared.pid"
-    
     sleep 3
-    kill -0 "$pid" 2>/dev/null && { log "[OK] Cloudflared started (PID: $pid)"; return 0; }
-    log "[ERROR] Cloudflared failed to start"
+    
+    kill -0 "$pid" 2>/dev/null && {
+        log_info "[OK] Cloudflared started (PID: $pid)"
+        return 0
+    }
+    log_error "Cloudflared failed to start"
     return 1
 }
 
+# Generate VMESS subscription
 generate_subscription() {
-    log "[INFO] Generating VMESS subscription..."
+    log_info "Generating VMESS subscription..."
     
     local domain="${CF_DOMAIN}"
     [[ -z "$domain" ]] && {
-        log "[INFO] Extracting domain from cloudflared log..."
         sleep 2
-        domain=$(grep -o 'https://.*\.trycloudflare\.com' "$WORK_DIR/cloudflared.log" | head -1 | sed 's|https://||')
+        domain=$(grep -o 'https://.*\.trycloudflare\.com' "$WORK_DIR/cloudflared.log" 2>/dev/null | head -1 | sed 's|https://||' || true)
     }
     
-    [[ -z "$domain" ]] && { log "[ERROR] No domain found"; return 1; }
+    [[ -z "$domain" ]] && {
+        log_error "No domain found for subscription"
+        return 1
+    }
     
     local node_json='{"v":"2","ps":"zampto-argo","add":"'"$domain"'","port":"443","id":"'"$UUID"'","aid":"0","net":"ws","type":"none","host":"'"$domain"'","path":"/ws","tls":"tls","sni":"'"$domain"'","fingerprint":"chrome"}'
     local node_b64=$(printf '%s' "$node_json" | base64 -w 0)
-    local vmess_url="vmess://${node_b64}"
     
     mkdir -p "$(dirname "$SUBSCRIPTION_FILE")"
-    printf '%s' "$vmess_url" | base64 -w 0 > "$SUBSCRIPTION_FILE"
+    printf '%s' "vmess://${node_b64}" | base64 -w 0 > "$SUBSCRIPTION_FILE"
     
-    log "[OK] Subscription generated"
-    log "[URL] https://$domain/sub"
-    log "[FILE] $SUBSCRIPTION_FILE"
+    log_info "[OK] Subscription generated: https://$domain/sub"
 }
 
+# Main execution
 main() {
-    log "========================================"
-    log "Wispbyte Argo Sing-box Deploy"
-    log "========================================"
+    log_info "========================================"
+    log_info "Wispbyte Argo Sing-box Deploy v1.2.0"
+    log_info "========================================"
     
     mkdir -p "$WORK_DIR" "$BIN_DIR"
     
@@ -181,13 +221,13 @@ main() {
     start_cloudflared || exit 1
     generate_subscription
     
-    log "========================================"
-    log "[SUCCESS] Deployment completed"
-    log "[SINGBOX] PID: $(cat "$WORK_DIR/singbox.pid" 2>/dev/null || echo 'unknown')"
-    log "[CLOUDFLARED] PID: $(cat "$WORK_DIR/cloudflared.pid" 2>/dev/null || echo 'unknown')"
-    log "[LOGS] $WORK_DIR"
-    log "========================================"
+    log_info "========================================"
+    log_info "[SUCCESS] Deployment completed"
+    log_info "[SINGBOX] PID: $(cat "$WORK_DIR/singbox.pid" 2>/dev/null || echo 'unknown')"
+    log_info "[CLOUDFLARED] PID: $(cat "$WORK_DIR/cloudflared.pid" 2>/dev/null || echo 'unknown')"
+    log_info "[LOGS] $WORK_DIR"
+    log_info "========================================"
 }
 
-trap "log 'Received signal, exiting...'; exit 0" SIGTERM SIGINT
+trap "log_info 'Received signal, exiting...'; exit 0" SIGTERM SIGINT
 main "$@"
