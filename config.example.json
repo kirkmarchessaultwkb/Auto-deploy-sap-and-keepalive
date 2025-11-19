@@ -1,9 +1,0 @@
-{
-  "cf_domain": "zampto.xunda.ggff.net",
-  "cf_token": "your_cloudflare_token_here",
-  "uuid": "12345678-1234-1234-1234-123456789abc",
-  "nezha_server": "nezha.example.com:8008",
-  "nezha_port": "5555",
-  "nezha_key": "your_nezha_key_here",
-  "port": "27039"
-}
